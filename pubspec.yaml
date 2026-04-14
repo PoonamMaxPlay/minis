@@ -1,0 +1,38 @@
+name: loopit_minis
+description: >
+  Standalone Minis package (capture API, video hub, session). Lives outside
+  LoopIt at repo root. Example app: flutter run from example/ — capture is home.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  audio_waveforms: ^1.3.0
+  # Transitive of pro_image_editor; 4.4+ breaks pro_image_editor 7.x (EmojiViewState arity).
+  emoji_picker_flutter: ">=4.3.0 <4.4.0"
+  camera: ^0.11.0+2
+  file_picker: ^10.3.8
+  get: ^4.7.2
+  image_picker: ^1.1.2
+  path: ^1.9.1
+  path_provider: ^2.1.5
+  permission_handler: ^11.3.1
+  pro_image_editor: ^7.0.0
+  pro_video_editor: ^1.14.4
+  video_player: ^2.9.2
+  video_thumbnail: ^0.5.6
+  phosphor_flutter: ^2.1.0
+  video_trimmer: 5.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
