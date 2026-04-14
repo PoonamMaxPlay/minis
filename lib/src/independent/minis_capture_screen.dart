@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -23,6 +23,7 @@ import 'package:loopit_minis/src/independent/minis_recording_ring_painter.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
+import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
 import 'package:phosphor_flutter/phosphor_flutter.dart';
 
@@ -62,6 +63,9 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
     this.permissionPolicy = MinisCapturePermissionPolicy.request,
     this.maxRecordingDuration = const Duration(seconds: 60),
     this.onClipConfirmed,
+    this.initialMusicPath,
+    this.initialMusicStartMs = 0,
+    this.initialMusicEndMs,
   });
 
   /// If null, a [CameraPluginMinisEngine] is created and disposed by this
@@ -81,6 +85,16 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
   /// path; otherwise the file is copied under app documents (`minis_captures`).
   final ValueChanged<String>? onClipConfirmed;
 
+  /// Optional preselected music file path (host-provided) used to seed the
+  /// minis music rail for flows like "make mini from this audio".
+  final String? initialMusicPath;
+
+  /// Optional start offset for [initialMusicPath].
+  final int initialMusicStartMs;
+
+  /// Optional end offset for [initialMusicPath]. If null, defaults to session cap.
+  final int? initialMusicEndMs;
+
   @override
   State<MinisIndependentCaptureScreen> createState() =>
       _MinisIndependentCaptureScreenState();
@@ -97,14 +111,15 @@ bool _pickedXFileIsVideo(XFile x) {
   return false;
 }
 
-class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureScreen>
-    with TickerProviderStateMixin {
+class _MinisIndependentCaptureScreenState
+    extends State<MinisIndependentCaptureScreen> with TickerProviderStateMixin {
   static const double _kRailIconSize = 25;
   static const double _kCornerBtnSize = 48;
   static const double _kCornerIconSize = 22;
   static const double _kAppBarIconSize = 26;
   static const double _kStatusPillIconSize = 17;
   static const double _kRailChevronSize = 26;
+
   /// Fixed column so rail icons and labels stay visually aligned.
   static const double _kRailColumnWidth = 72;
   static const double _kRailIconSlotHeight = 28;
@@ -142,6 +157,7 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
   bool _guideStartInProgress = false;
   static const List<double> _speedSteps = [0.5, 1.0, 1.5, 2.0, 3.0];
   int _speedIndex = 1;
+
   /// Appended video segments (camera hold-to-record or gallery video).
   final List<MinisRecordingClip> _videoClips = [];
   int _clipsTotalDurationMs = 0;
@@ -194,6 +210,7 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
     try {
       await _engine!.initialize();
       if (mounted) setState(() => _busy = false);
+      await _applyInitialMusicPrefillIfAny();
     } catch (e, st) {
       debugPrint('MinisIndependentCaptureScreen init failed: $e\n$st');
       if (mounted) {
@@ -203,6 +220,30 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
         });
       }
     }
+  }
+
+  Future<void> _applyInitialMusicPrefillIfAny() async {
+    final inputPath = widget.initialMusicPath;
+    if (inputPath == null || inputPath.trim().isEmpty) return;
+    final normalized = inputPath.replaceAll('\\', '/');
+    final file = File(normalized);
+    if (!await file.exists()) {
+      debugPrint('minis: initial music file not found: $normalized');
+      return;
+    }
+    final startMs = math.max(0, widget.initialMusicStartMs);
+    final endMs = widget.initialMusicEndMs == null
+        ? math.max(startMs + 1000, _sessionCapMs)
+        : math.max(startMs, widget.initialMusicEndMs!);
+    if (!mounted) return;
+    setState(() {
+      _musicSegment = MinisMusicSegment(
+        path: normalized,
+        startMs: startMs,
+        endMs: endMs,
+      );
+    });
+    await _prepareGuideMusic();
   }
 
   @override
@@ -359,7 +400,8 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
       _logGuideAudio('play result: state=${p.playerState}');
       _musicGuidePosSub = p.onCurrentDurationChanged.listen((pos) {
         if (pos >= seg.endMs) {
-          _logGuideAudio('auto pause at segment end: pos=$pos end=${seg.endMs}');
+          _logGuideAudio(
+              'auto pause at segment end: pos=$pos end=${seg.endMs}');
           unawaited(p.pausePlayer());
         }
       });
@@ -513,9 +555,45 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
     return null;
   }
 
+  MinisHostMusicSelection? _currentHostSelection() {
+    final seg = _musicSegment;
+    if (seg == null) return null;
+    return MinisHostMusicSelection(
+      path: seg.path,
+      startMs: seg.startMs,
+      endMs: seg.endMs,
+    );
+  }
+
+  Future<bool> _pickMusicFromHostIfAvailable() async {
+    if (!MinisCaptureHost.isMusicPickerRegistered) return false;
+    final selection = await MinisCaptureHost.pickMusic(
+      currentSelection: _currentHostSelection(),
+      sessionCapMs: _sessionCapMs,
+    );
+    if (!mounted) return true;
+    if (selection == null) return true;
+    if (selection.path.isEmpty) {
+      _toast('Could not load selected music.');
+      return true;
+    }
+    final segment = MinisMusicSegment(
+      path: selection.path,
+      startMs: math.max(0, selection.startMs),
+      endMs: math.max(selection.startMs, selection.endMs),
+    );
+    setState(() => _musicSegment = segment);
+    await _prepareGuideMusic();
+    _toast('Music ready - long-press Sounds to clear');
+    return true;
+  }
+
   Future<void> _pickMusic() async {
     if (kIsWeb || _busy || _recording || _countingDown) return;
     try {
+      final handledByHost = await _pickMusicFromHostIfAvailable();
+      if (handledByHost) return;
+
       final existing = _musicSegment;
       if (minisAudioWaveformsTrimSupported() &&
           existing != null &&
@@ -597,7 +675,8 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
     });
   }
 
-  Future<Uint8List?> _thumbnailForVideoPath(String filePath, int durationMs) async {
+  Future<Uint8List?> _thumbnailForVideoPath(
+      String filePath, int durationMs) async {
     try {
       final tMs = durationMs > 120 ? durationMs - 100 : 0;
       return VideoThumbnail.thumbnailData(
@@ -865,8 +944,8 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
                                         ? 'Merge order: ${index + 1} of ${_videoClips.length}'
                                         : 'Reorder for merge � trim on device',
                                     style: TextStyle(
-                                      color: Colors.white
-                                          .withValues(alpha: 0.55),
+                                      color:
+                                          Colors.white.withValues(alpha: 0.55),
                                       fontSize: 12,
                                     ),
                                   ),
@@ -1181,7 +1260,8 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
       unawaited(_startGuideMusicForRecording());
       unawaited(_ensureGuideMusicPlayingAfterRecordStart());
       _clipElapsedTicker?.cancel();
-      _clipElapsedTicker = Timer.periodic(const Duration(milliseconds: 200), (_) {
+      _clipElapsedTicker =
+          Timer.periodic(const Duration(milliseconds: 200), (_) {
         if (mounted && _recording) setState(() {});
       });
       _maxRecordTimer?.cancel();
@@ -1211,9 +1291,8 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
     _clipElapsedTicker = null;
     final started = _activeClipStartedAt;
     _activeClipStartedAt = null;
-    var rawElapsed = started != null
-        ? DateTime.now().difference(started).inMilliseconds
-        : 0;
+    var rawElapsed =
+        started != null ? DateTime.now().difference(started).inMilliseconds : 0;
     rawElapsed = math.min(rawElapsed, _clipBudgetMsAtRecordStart);
     try {
       final path = await eng.stopRecording();
@@ -1721,7 +1800,8 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
                   _railAction(
                     icon: PhosphorIconsRegular.cameraRotate,
                     label: 'Flip',
-                    onTap: (_busy || _recording || _countingDown) ? null : _flip,
+                    onTap:
+                        (_busy || _recording || _countingDown) ? null : _flip,
                   ),
                   if (_railExpanded) ...[
                     _railAction(
@@ -1925,8 +2005,7 @@ class _MinisIndependentCaptureScreenState extends State<MinisIndependentCaptureS
                                     color: _recording
                                         ? Colors.redAccent
                                             .withValues(alpha: 0.22)
-                                        : Colors.white
-                                            .withValues(alpha: 0.08),
+                                        : Colors.white.withValues(alpha: 0.08),
                                   ),
                                   alignment: Alignment.center,
                                   child: _recording
