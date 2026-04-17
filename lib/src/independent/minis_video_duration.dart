@@ -6,6 +6,19 @@ import 'package:flutter/foundation.dart';
 import 'package:pro_video_editor/pro_video_editor.dart';
 import 'package:video_player/video_player.dart';
 
+/// Duration from ProVideoEditor metadata only (no extra [VideoPlayer]). Fast; pair with preview duration.
+Future<int> minisResolveVideoDurationMsMetadataOnly(String filePath) async {
+  final file = File(filePath);
+  if (!await file.exists()) return 0;
+  try {
+    final meta =
+        await ProVideoEditor.instance.getMetadata(EditorVideo.file(file));
+    return meta.duration.inMilliseconds.clamp(0, 1 << 30);
+  } catch (_) {
+    return 0;
+  }
+}
+
 /// Resolves playback length for a local file.
 ///
 /// [ProVideoEditor.instance.getMetadata] sometimes reports ~1s (or zero) for
@@ -15,7 +28,8 @@ Future<int> minisResolveVideoDurationMs(String filePath) async {
   final file = File(filePath);
   if (!await file.exists()) return 0;
 
-  final fromPlayer = await _durationMsViaVideoPlayer(file);
+  // Resolve metadata first so we do not wait on [VideoPlayer] when the editor
+  // already knows duration (common for gallery MP4s; helps multi-clip sessions).
   int metaMs = 0;
   try {
     final meta =
@@ -23,7 +37,7 @@ Future<int> minisResolveVideoDurationMs(String filePath) async {
     metaMs = meta.duration.inMilliseconds.clamp(0, 1 << 30);
   } catch (_) {}
 
-  // Some files report ~1s on one codec path and a sane value on the other.
+  final fromPlayer = await _durationMsViaVideoPlayer(file);
   return math.max(fromPlayer, metaMs);
 }
 
@@ -35,8 +49,10 @@ Future<int> minisResolveVideoDurationMsBestEffort(String filePath) async {
   if (best >= 2000) {
     return best;
   }
-  for (var i = 0; i < 5; i++) {
-    await Future<void>.delayed(const Duration(milliseconds: 400));
+  // Gallery / fresh exports often report ~0-1s until the container is readable.
+  const delays = <int>[250, 400, 550];
+  for (var i = 0; i < delays.length; i++) {
+    await Future<void>.delayed(Duration(milliseconds: delays[i]));
     final next = await minisResolveVideoDurationMs(filePath);
     if (next > best) {
       best = next;
@@ -58,38 +74,218 @@ int minisCoalesceClipDurationMs(int reportedMs, int probedMs) {
   if (probedMs <= 0) {
     return r;
   }
+  // Probe looks like noise (decoder not ready) but reported is clearly long.
+  if (probedMs < 500 && r >= 2000) {
+    return r;
+  }
+  // Reported looks like noise / timer glitch but probe read a long file.
+  if (r < 500 && probedMs >= 5000) {
+    return probedMs;
+  }
   if (probedMs < 2000 && r > probedMs * 3) {
     return r;
   }
   return math.max(r, probedMs);
 }
 
-/// Resolves final clip length for multi-clip reels: combines [reportedMs] (camera
-/// wall clock, trim span, or preview player) with file probes.
+/// Android often reports **~1000ms** until the container is fully parsed; for a
+/// multi-MB file that is almost never the real length. Used after normal probes.
+/// NOTE: only used for freshly recorded camera clips, never for gallery files.
+Future<int> _extendDurationIfLargeFileLooksTooShort(
+  String filePath,
+  int reportedMs,
+  int ms,
+) async {
+  final file = File(filePath);
+  if (!await file.exists()) return ms;
+  final len = await file.length();
+  if (len < 48 * 1024) return ms;
+  if (ms > 2200) return ms;
+
+  var best = ms;
+  if (reportedMs >= 4000 && best >= 2000 && best >= reportedMs ~/ 2) {
+    return best;
+  }
+  const waits = <int>[400, 1100, 2200];
+  for (final w in waits) {
+    await Future<void>.delayed(Duration(milliseconds: w));
+    final p = await minisResolveVideoDurationMsBestEffort(filePath);
+    best = minisCoalesceClipDurationMs(reportedMs, math.max(best, p));
+    if (best >= 5000) {
+      break;
+    }
+    if (reportedMs >= 3000 && best >= 2500) {
+      break;
+    }
+  }
+  return best;
+}
+
+/// Refines a suspiciously short first probe before trim/cap decisions on
+/// gallery imports.
+Future<int> minisRefineGalleryPreflightProbeMs(
+  String filePath,
+  int probeMs,
+) async {
+  if (probeMs >= 2500) return probeMs;
+  final file = File(filePath);
+  if (!await file.exists()) return probeMs;
+  final len = await file.length();
+  if (len < 48 * 1024) return probeMs;
+  await Future<void>.delayed(const Duration(milliseconds: 700));
+  final p = await minisResolveVideoDurationMsBestEffort(filePath);
+  return math.max(probeMs, p);
+}
+
+// ---------------------------------------------------------------------------
+// Fast-path probe for gallery / pre-existing files
+// ---------------------------------------------------------------------------
+
+/// Resolves duration for a **gallery-picked or pre-existing** file in one fast
+/// concurrent probe (typical: 100-400 ms, hard cap 2 s).
 ///
-/// A single probe often returns ~1000ms for MP4s until the container is fully
-/// readable � especially on **second and later** appends in one session. This
-/// runs a second pass after a short delay when the first pass is still short.
-Future<int> minisFinalizeClipDurationMs(int reportedMs, String filePath) async {
+/// Gallery videos are fully written on disk and never have the "fresh export
+/// ~1 s placeholder" problem that camera clips do. Both ProVideoEditor and
+/// VideoPlayer are started in parallel; the best result wins.
+Future<int> _resolveGalleryFileDurationMs(
+  String filePath,
+  int reportedMs,
+) async {
+  debugPrint('\n=== MINIS DURATION PROBE START ===');
+  debugPrint('Path: $filePath');
+  debugPrint('Reported: $reportedMs');
+  
+  final file = File(filePath);
+  if (!await file.exists()) {
+    debugPrint('ERROR: File does not exist! Returning ${math.max(reportedMs, 1)}');
+    return math.max(reportedMs, 1);
+  }
+
+  final startTime = DateTime.now();
+
+  final metaFuture = _probeViaMeta(file);
+  final playerFuture = _durationMsViaVideoPlayer(file);
+
+  int best = 0;
+  try {
+    debugPrint('Racing both probers (8s timeout)...');
+    final results = await Future.wait([metaFuture, playerFuture]).timeout(
+      const Duration(seconds: 8),
+      onTimeout: () {
+        debugPrint('ERROR: Future.wait TIMED OUT after 8 seconds!');
+        return [0, 0];
+      },
+    );
+    debugPrint('Results: Meta=${results[0]}ms, Player=${results[1]}ms');
+    for (final r in results) {
+      if (r > best) best = r;
+    }
+  } catch (e, st) {
+    debugPrint('ERROR: Exception during Future.wait: $e\n$st');
+    try {
+      final m = await metaFuture;
+      debugPrint('Fallback meta result: $m');
+      if (m > best) best = m;
+    } catch (_) {}
+  }
+
+  final endTime = DateTime.now();
+  debugPrint('Probes took ${endTime.difference(startTime).inMilliseconds}ms. Best raw probe: $best');
+
+  final coalesced = minisCoalesceClipDurationMs(
+    math.max(reportedMs, 1),
+    best,
+  );
+  
+  debugPrint('Final coalesced duration: $coalesced');
+  debugPrint('=== MINIS DURATION PROBE END ===\n');
+  return math.max(coalesced, 1);
+}
+
+Future<int> _probeViaMeta(File file) async {
+  try {
+    debugPrint('[_probeViaMeta] Starting ProVideoEditor metadata read...');
+    final meta =
+        await ProVideoEditor.instance.getMetadata(EditorVideo.file(file));
+    debugPrint('[_probeViaMeta] Success! duration=${meta.duration.inMilliseconds}ms');
+    return meta.duration.inMilliseconds.clamp(0, 1 << 30);
+  } catch (e, st) {
+    debugPrint('[_probeViaMeta] Failed: $e\n$st');
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
+/// Resolves final clip length for multi-clip reels.
+///
+/// **[fromGalleryFile] = true** — gallery / media-library pick. File is
+/// pre-existing and fully written, so the heavy retry loops are skipped.
+/// A single fast concurrent probe runs (typical 100-400 ms, max 2 s).
+///
+/// **[fromGalleryPreview] = true** — the preview player already reported a
+/// duration >= 3000 ms. Also uses the fast path since the file is known-good.
+///
+/// **Default** (camera clip) — keeps the original retry strategy because
+/// container metadata may genuinely be unavailable for several seconds after
+/// recording stops.
+Future<int> minisFinalizeClipDurationMs(
+  int reportedMs,
+  String filePath, {
+  bool fromGalleryPreview = false,
+  bool fromGalleryFile = false,
+}) async {
+  // Fast path: gallery / media-library files are fully written.
+  if (fromGalleryFile || fromGalleryPreview) {
+    return _resolveGalleryFileDurationMs(filePath, reportedMs);
+  }
+
+  // Slow path: freshly recorded camera clip.
   final r = reportedMs.clamp(1, 1 << 30);
   var probed = await minisResolveVideoDurationMsBestEffort(filePath);
   var ms = minisCoalesceClipDurationMs(r, probed);
   if (ms >= 2000) {
-    return ms;
+    ms = await _extendDurationIfLargeFileLooksTooShort(filePath, r, ms);
+    return math.max(1, ms);
   }
-  await Future<void>.delayed(const Duration(milliseconds: 750));
+  await Future<void>.delayed(const Duration(milliseconds: 400));
   probed = await minisResolveVideoDurationMs(filePath);
   ms = minisCoalesceClipDurationMs(r, math.max(ms, probed));
   if (ms >= 2000) {
-    return ms;
+    ms = await _extendDurationIfLargeFileLooksTooShort(filePath, r, ms);
+    return math.max(1, ms);
   }
   probed = await minisResolveVideoDurationMsBestEffort(filePath);
   ms = minisCoalesceClipDurationMs(r, math.max(ms, probed));
+  if (ms < 2000) {
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    probed = await minisResolveVideoDurationMsBestEffort(filePath);
+    ms = minisCoalesceClipDurationMs(r, math.max(ms, probed));
+  }
+  ms = await _extendDurationIfLargeFileLooksTooShort(filePath, r, ms);
   return math.max(1, ms);
 }
 
+/// Human-readable length for clip lists (e.g. `0:12`, `1:05`), not raw seconds.
+///
+/// Any positive [ms] shows at least `0:01` — half-second rounding can otherwise
+/// show `0:00` for real clips (e.g. 400ms), which breaks multi-clip rows.
+String minisFormatClipDurationLabel(int ms) {
+  if (ms <= 0) return '0:00';
+  var totalSec = (ms + 500) ~/ 1000;
+  if (totalSec < 1) totalSec = 1;
+  final m = totalSec ~/ 60;
+  final s = totalSec % 60;
+  return '$m:${s.toString().padLeft(2, '0')}';
+}
+
 Future<int> _durationMsViaVideoPlayer(File file) async {
-  final controller = VideoPlayerController.file(file);
+  final controller = VideoPlayerController.file(
+    file,
+    videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+  );
   try {
     await controller.initialize();
 
@@ -111,7 +307,7 @@ Future<int> _durationMsViaVideoPlayer(File file) async {
         await controller.setVolume(0);
         await controller.seekTo(Duration.zero);
         await controller.play();
-        for (var i = 0; i < 40; i++) {
+        for (var i = 0; i < 60; i++) {
           ms = controller.value.duration.inMilliseconds;
           if (ms > 0) break;
           await Future<void>.delayed(const Duration(milliseconds: 100));

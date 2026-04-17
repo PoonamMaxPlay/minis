@@ -105,7 +105,31 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       }
       await minisWaitForVideoControllerDuration(ctrl);
       if (!mounted) return;
-      final total = ctrl.value.duration.inMilliseconds;
+      var total = ctrl.value.duration.inMilliseconds;
+      if (total <= 0) {
+        setState(() => _loadFailed = true);
+        return;
+      }
+      // Same ~1s placeholder issue as multi-clip duration: reload once after
+      // a beat so [Trimmer]'s player re-reads container length on large MP4s.
+      try {
+        final len = await widget.videoFile.length();
+        if (len >= 400 * 1024 && total < 2200) {
+          await Future<void>.delayed(const Duration(milliseconds: 1600));
+          if (!mounted) return;
+          await _trimmer.loadVideo(videoFile: widget.videoFile);
+          if (!mounted) return;
+          final ctrl2 = _trimmer.videoPlayerController;
+          if (ctrl2 != null) {
+            await minisWaitForVideoControllerDuration(ctrl2);
+            if (!mounted) return;
+            final t2 = ctrl2.value.duration.inMilliseconds;
+            if (t2 > total) {
+              total = t2;
+            }
+          }
+        }
+      } catch (_) {}
       if (total <= 0) {
         setState(() => _loadFailed = true);
         return;
@@ -149,6 +173,10 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       return;
     }
     setState(() => _saving = true);
+    // Bug 3 fix: _saving is reset in a finally block that wraps the entire
+    // native call so it is guaranteed to clear even when the onSave callback
+    // fires on a background thread after the widget has left the tree.
+    bool _poppedFromOnSave = false;
     try {
       await _trimmer.saveTrimmedVideo(
         startValue: _startMs,
@@ -162,6 +190,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
           if (outputPath != null && outputPath.isNotEmpty) {
             final spanMs =
                 (_endMs - _startMs).round().clamp(1, 24 * 60 * 60 * 1000);
+            _poppedFromOnSave = true;
             Navigator.of(context, rootNavigator: true).pop(
               MinisReelTrimResult(path: outputPath, durationMs: spanMs),
             );
@@ -176,8 +205,9 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
               'spanMs': _endMs - _startMs,
             },
           );
-          setState(() => _saving = false);
-          showMinisToast(context, messageForVideoTrimMissingOutput());
+          if (mounted) {
+            showMinisToast(context, messageForVideoTrimMissingOutput());
+          }
         },
       );
     } catch (e, st) {
@@ -192,8 +222,13 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         },
       );
       if (mounted) {
-        setState(() => _saving = false);
         showMinisToast(context, messageForVideoTrimFailure(e));
+      }
+    } finally {
+      // Always clear _saving so the Save button re-enables. Skip if we already
+      // popped via onSave (widget may be disposed by the time finally runs).
+      if (mounted && !_poppedFromOnSave) {
+        setState(() => _saving = false);
       }
     }
   }
@@ -201,17 +236,57 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
   @override
   Widget build(BuildContext context) {
     if (_loadFailed) {
+      // Bug 10 fix: provide Retry and Close so the user is never stranded.
       return Scaffold(
         backgroundColor: Colors.black,
         appBar: AppBar(
           backgroundColor: Colors.black,
           foregroundColor: Colors.white,
           title: const Text('Trim clip'),
+          leading: IconButton(
+            icon: const Icon(Icons.close),
+            onPressed: () =>
+                Navigator.of(context, rootNavigator: true).pop<MinisReelTrimResult>(),
+          ),
         ),
-        body: const Center(
-          child: Text(
-            'Could not load this clip.',
-            style: TextStyle(color: Colors.white70),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.videocam_off_outlined,
+                    size: 48, color: Colors.white54),
+                const SizedBox(height: 20),
+                const Text(
+                  'Could not load this clip for trimming.\n'
+                  'The file may be in an unsupported format.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white70, height: 1.45),
+                ),
+                const SizedBox(height: 24),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    setState(() => _loadFailed = false);
+                    unawaited(_loadVideo());
+                  },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side:
+                        const BorderSide(color: Colors.white38),
+                  ),
+                  icon: const Icon(Icons.refresh, size: 20),
+                  label: const Text('Try again'),
+                ),
+                const SizedBox(height: 10),
+                TextButton(
+                  onPressed: () => Navigator.of(context, rootNavigator: true)
+                      .pop<MinisReelTrimResult>(),
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
           ),
         ),
       );
@@ -290,7 +365,14 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                   type: ViewerType.auto,
                   durationStyle: DurationStyle.FORMAT_MM_SS,
                   onChangeStart: (v) => _startMs = v,
-                  onChangeEnd: (v) => _endMs = v,
+                  // Bug 5 fix: clamp end handle so it never exceeds
+                  // startMs + the viewer cap (video_trimmer callbacks can
+                  // fire slightly out-of-bounds on a fast fling).
+                  onChangeEnd: (v) {
+                    final maxEnd = _startMs +
+                        _viewerMaxOut.inMilliseconds.toDouble();
+                    _endMs = v.clamp(_startMs, maxEnd);
+                  },
                   onChangePlaybackState: (playing) {
                     if (mounted) {
                       setState(() => _isPlaying = playing);

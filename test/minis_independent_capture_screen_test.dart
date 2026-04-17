@@ -18,6 +18,26 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Flip'), findsOneWidget);
   });
+
+  testWidgets(
+      'narrow layout: bottom bar fits without overflow errors',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320, 568));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MinisIndependentCaptureScreen(
+          permissionPolicy: MinisCapturePermissionPolicy.assumeGranted,
+          engine: _FakeEngine(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _FakeEngine implements MinisCameraEnginePort {

@@ -8,26 +8,28 @@ void main() {
     MinisCaptureHost.resetForTest();
   });
 
-  testWidgets('openCapture throws when not registered', (tester) async {
+  testWidgets('openCapture returns null when not registered (no throw)', (tester) async {
+    Object? result = Object();
     await tester.pumpWidget(
       GetMaterialApp(
-        home: Builder(
-          builder: (context) {
-            return Scaffold(
-              body: Center(
-                child: ElevatedButton(
-                  onPressed: () {
-                    MinisCaptureHost.openCapture<void>();
-                  },
-                  child: const Text('go'),
-                ),
-              ),
-            );
-          },
+        home: Scaffold(
+          body: Center(
+            child: ElevatedButton(
+              onPressed: () async {
+                result = await MinisCaptureHost.openCapture<dynamic>();
+              },
+              child: const Text('go'),
+            ),
+          ),
         ),
       ),
     );
     await tester.tap(find.text('go'));
-    expect(tester.takeException(), isA<StateError>());
+    await tester.pumpAndSettle();
+    expect(result, isNull);
+    expect(tester.takeException(), isNull);
+    // Snackbar auto-dismiss timer (3s) + exit animation must finish before teardown.
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
   });
 }

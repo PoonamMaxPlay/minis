@@ -74,24 +74,43 @@ abstract final class MinisCaptureHost {
   /// Whether [registerMusicPicker] has been called.
   static bool get isMusicPickerRegistered => _musicPicker != null;
 
+  static void _snack(String message) {
+    try {
+      Get.snackbar(
+        'Minis',
+        message,
+        snackPosition: SnackPosition.TOP,
+        duration: const Duration(seconds: 3),
+        backgroundColor: const Color(0xE61C1C1E),
+        colorText: Colors.white,
+        margin: const EdgeInsets.all(16),
+        borderRadius: 10,
+      );
+    } catch (_) {}
+  }
+
   /// Pushes the Minis capture route on root Navigator.
   ///
   /// Set [videoOnly] for reel / “Minis” flows where still photos must not be
   /// captured or imported; leave false for story and feed camera pickers.
+  ///
+  /// Returns `null` if Minis is not registered, or a capture session is
+  /// already open (shows a short message when [Get] is available).
   static Future<T?> openCapture<T>({
     BuildContext? context,
     bool videoOnly = false,
   }) {
     final b = _builder;
     if (b == null) {
-      throw StateError(
-        'MinisCaptureHost.register(...) was not called. '
-        'Register from the LoopIt app (see minis_capture_registration.dart).',
+      _snack(
+        'Camera is not available in this build. Update the app or reinstall.',
       );
+      return Future<T?>.value(null);
     }
     if (_captureResultCompleter != null &&
         !(_captureResultCompleter?.isCompleted ?? true)) {
-      throw StateError('Minis capture is already in progress.');
+      _snack('Minis is already open. Close it first, then try again.');
+      return Future<T?>.value(null);
     }
     final completer = Completer<Object?>();
     _captureResultCompleter = completer;

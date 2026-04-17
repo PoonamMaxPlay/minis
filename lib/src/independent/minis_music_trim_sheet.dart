@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/independent/minis_music_trim_math.dart';
+import 'package:loopit_minis/src/minis_user_message.dart';
 
 /// Pick start time for a slice of [audioPath] up to [sessionCapMs] long (reel cap).
 ///
@@ -130,7 +131,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
     super.initState();
     _audioPlayer.overrideAudioSession = true;
     _scrollController.addListener(_onScrollChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) => unawaited(_initPlayer()));
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => unawaited(_initPlayer()));
   }
 
   static Future<String?> _normalisedPath(String raw) async {
@@ -281,7 +283,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
       _audioStartMs = 0;
       _currentProgress = 0;
     });
-    _logTrim('init ok: path=$path durationMs=$d windowMs=$_windowMs bars=$_waveBarCount');
+    _logTrim(
+        'init ok: path=$path durationMs=$d windowMs=$_windowMs bars=$_waveBarCount');
 
     try {
       await _audioPlayer.setFinishMode(finishMode: FinishMode.pause);
@@ -447,7 +450,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
       _startingPlayback = false;
       return;
     }
-    _logTrim('play requested: playerState=${_audioPlayer.playerState} startMs=$_audioStartMs durationMs=$d');
+    _logTrim(
+        'play requested: playerState=${_audioPlayer.playerState} startMs=$_audioStartMs durationMs=$d');
 
     var duration = d;
     final refreshedDuration = await _readDurationWithRetry(3);
@@ -461,9 +465,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
 
     _listenPlayer();
     try {
-      final safeStartMs = _audioStartMs
-          .clamp(0, math.max(0, duration - 1))
-          .toInt();
+      final safeStartMs =
+          _audioStartMs.clamp(0, math.max(0, duration - 1)).toInt();
       if (safeStartMs != _audioStartMs && mounted) {
         setState(() => _audioStartMs = safeStartMs);
       }
@@ -471,7 +474,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
       final shouldPrepare = stateBeforePlay.isStopped ||
           (!stateBeforePlay.isInitialised && !stateBeforePlay.isPaused);
       if (shouldPrepare) {
-        _logTrim('prepare before play: state=${_audioPlayer.playerState} path=$path');
+        _logTrim(
+            'prepare before play: state=${_audioPlayer.playerState} path=$path');
         await _playerCall(
           () => _audioPlayer.preparePlayer(
             path: path,
@@ -495,7 +499,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
         () => _audioPlayer.seekTo(safeStartMs),
         step: 'seek',
       );
-      _logTrim('seek done: safeStartMs=$safeStartMs state=${_audioPlayer.playerState}');
+      _logTrim(
+          'seek done: safeStartMs=$safeStartMs state=${_audioPlayer.playerState}');
       await _playerCall(
         () => _audioPlayer.startPlayer(),
         step: 'start',
@@ -536,7 +541,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
 
       if (!mounted) return;
       setState(() => _isPlaying = true);
-      _logTrim('play success: previewMs=$previewMs state=${_audioPlayer.playerState}');
+      _logTrim(
+          'play success: previewMs=$previewMs state=${_audioPlayer.playerState}');
 
       _previewCapTimer?.cancel();
       _previewCapTimer = Timer(Duration(milliseconds: previewMs), () {
@@ -546,7 +552,9 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
       _logTrim('play exception: $e state=${_audioPlayer.playerState}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Playback failed: $e')),
+          SnackBar(
+            content: Text(minisUserFriendlyException(e, context: 'audio')),
+          ),
         );
       }
     } finally {
@@ -651,8 +659,10 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final noScrollNeeded =
-        !_loading && _error == null && _maxStartMsValue == 0 && _durationMs != null;
+    final noScrollNeeded = !_loading &&
+        _error == null &&
+        _maxStartMsValue == 0 &&
+        _durationMs != null;
 
     return Material(
       borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
@@ -773,7 +783,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
                               ),
                               child: DecoratedBox(
                                 decoration: BoxDecoration(
-                                  color: theme.colorScheme.surfaceContainerHighest,
+                                  color:
+                                      theme.colorScheme.surfaceContainerHighest,
                                   borderRadius: BorderRadius.circular(20),
                                 ),
                                 child: Padding(
@@ -797,7 +808,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
                           LayoutBuilder(
                             builder: (context, constraints) {
                               final bandW = constraints.maxWidth;
-                              final pad = math.max(0.0, bandW / 2 - _boxWidth / 2);
+                              final pad =
+                                  math.max(0.0, bandW / 2 - _boxWidth / 2);
                               return SizedBox(
                                 height: 56,
                                 width: bandW,
@@ -833,14 +845,16 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
                                                   _borderWidth / 2,
                                                 ),
                                                 child: ColoredBox(
-                                                  color: theme.colorScheme.surface,
+                                                  color:
+                                                      theme.colorScheme.surface,
                                                   child: Align(
                                                     alignment:
                                                         Alignment.centerRight,
                                                     child: AnimatedContainer(
                                                       duration: Duration(
                                                         milliseconds:
-                                                            _currentProgress == 0
+                                                            _currentProgress ==
+                                                                    0
                                                                 ? 0
                                                                 : 120,
                                                       ),
@@ -917,9 +931,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
                                                       height: index % 2 == 0
                                                           ? 20
                                                           : 12,
-                                                      margin:
-                                                          const EdgeInsets
-                                                              .symmetric(
+                                                      margin: const EdgeInsets
+                                                          .symmetric(
                                                         horizontal:
                                                             _barHorizontalMargin,
                                                       ),
@@ -959,8 +972,8 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
                                 width: 57,
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: theme
-                                      .colorScheme.surfaceContainerHighest,
+                                  color:
+                                      theme.colorScheme.surfaceContainerHighest,
                                 ),
                                 alignment: Alignment.center,
                                 child: Icon(

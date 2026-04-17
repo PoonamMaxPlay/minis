@@ -2,6 +2,8 @@ import 'dart:developer' as developer;
 
 import 'package:flutter/services.dart';
 
+import 'package:loopit_minis/src/minis_user_message.dart';
+
 /// Developer / Crashlytics-friendly line: full [PlatformException] fields and optional context.
 /// Does not throw; safe to call before showing [messageForVideoTrimFailure].
 void logVideoTrimDiagnostic(
@@ -32,10 +34,11 @@ void logVideoTrimDiagnostic(
     extra.forEach((k, v) => buf.writeln('  $k: $v'));
   }
   buf.writeln('userFacing: ${messageForVideoTrimFailure(error)}');
+  // Do not pass [error] into [developer.log]: it duplicates the full
+  // PlatformException line (nested "PlatformException (PlatformException(...))").
   developer.log(
     buf.toString().trimRight(),
     name: 'loopit_video_trim',
-    error: error is Exception || error is Error ? error : null,
     stackTrace: stackTrace,
   );
 }
@@ -70,12 +73,24 @@ String messageForVideoTrimFailure(Object error) {
   return _genericTrimAdvice();
 }
 
+String _trimDecoderRecoveryMessage() =>
+    'This clip could not be trimmed on this device. '
+    'Try another file or export as MP4 (H.264).';
+
 String _messageForPlatformException(PlatformException e) {
-  final code = e.code;
+  final codeLower = e.code.toLowerCase();
   final raw = e.message;
   final msg = (raw != null && raw.isNotEmpty && raw != 'null') ? raw : '';
+  final combined =
+      '$codeLower ${msg.toLowerCase()} ${e.details?.toString() ?? ''}';
 
-  switch (code) {
+  if (codeLower == 'videoerror' ||
+      minisLooksLikeDecoderOrPlaybackDump(combined) ||
+      minisLooksLikeDecoderOrPlaybackDump(msg)) {
+    return _trimDecoderRecoveryMessage();
+  }
+
+  switch (e.code) {
     case 'INVALID_ARGUMENTS':
       return 'Trim could not start. Close this screen and try again.';
     case 'INVALID_TIME_RANGE':
@@ -91,6 +106,9 @@ String _messageForPlatformException(PlatformException e) {
 }
 
 String _interpretTrimErrorMessage(String message) {
+  if (minisLooksLikeDecoderOrPlaybackDump(message)) {
+    return _trimDecoderRecoveryMessage();
+  }
   final m = message.toLowerCase();
 
   if (m.contains('not found') || m.contains('file not found')) {
@@ -112,9 +130,7 @@ String _interpretTrimErrorMessage(String message) {
   if (m.contains('cancelled')) {
     return 'Trim was cancelled.';
   }
-  if (m.contains('space') ||
-      m.contains('storage') ||
-      m.contains('no space')) {
+  if (m.contains('space') || m.contains('storage') || m.contains('no space')) {
     return 'Not enough storage to save the trimmed video. Free some space and try again.';
   }
   if (m.contains('permission') || m.contains('denied')) {

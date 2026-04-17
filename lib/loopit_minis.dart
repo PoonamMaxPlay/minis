@@ -17,4 +17,5 @@ export 'package:loopit_minis/src/minis_capture_host.dart';
 export 'package:loopit_minis/src/minis_capture_placeholder.dart';
 export 'package:loopit_minis/src/minis_capture_ports.dart';
 export 'package:loopit_minis/src/session_and_toast.dart';
+export 'package:loopit_minis/src/minis_user_message.dart';
 export 'package:loopit_minis/src/native_video_trim_user_message.dart';
