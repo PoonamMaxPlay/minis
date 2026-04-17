@@ -9,7 +9,8 @@ import 'minis_example_save.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   MinisCaptureHost.register(
-    () => MinisIndependentCaptureScreen(
+    ({bool videoOnly = false}) => MinisIndependentCaptureScreen(
+      videoOnly: videoOnly,
       onClipConfirmed: (path) {
         unawaited(MinisExampleSave.saveAndNotify(path));
       },

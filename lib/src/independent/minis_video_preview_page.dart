@@ -1,11 +1,26 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
+import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
+
+/// Result of confirming [MinisVideoPreviewPage] — includes **durationMs** from
+/// the same [VideoPlayerController] that rendered the preview (avoids bad
+/// standalone file probes that often report ~1s for MP4s).
+class MinisVideoPreviewResult {
+  const MinisVideoPreviewResult({
+    required this.path,
+    required this.durationMs,
+  });
+
+  final String path;
+  final int durationMs;
+}
 
 /// Full-screen video preview: play/pause, scrub timeline, optional **Trim**
 /// (same [video_trimmer] flow as LoopIt), **Use** to return the current path,
@@ -27,9 +42,9 @@ class MinisVideoPreviewPage extends StatefulWidget {
   /// the app bar (merged reel / long exports).
   final bool allowReelTrim;
 
-  /// Pushes this page and returns the active file path if the user confirms.
+  /// Pushes this page and returns path + duration when the user confirms.
   /// Waits for the file to exist (handles late flush after merge/export).
-  static Future<String?> open(
+  static Future<MinisVideoPreviewResult?> open(
     BuildContext context,
     String videoPath, {
     String title = 'Preview',
@@ -40,8 +55,9 @@ class MinisVideoPreviewPage extends StatefulWidget {
     if (!ready || !context.mounted) {
       return null;
     }
-    return Navigator.of(context).push<String?>(
-      MaterialPageRoute<String?>(
+    return Navigator.of(context, rootNavigator: true)
+        .push<MinisVideoPreviewResult?>(
+      MaterialPageRoute<MinisVideoPreviewResult?>(
         fullscreenDialog: true,
         builder: (_) => MinisVideoPreviewPage(
           videoPath: videoPath,
@@ -62,6 +78,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   VideoPlayerController? _controller;
   Object? _initError;
   bool _scrubbing = false;
+  bool _confirmBusy = false;
 
   @override
   void initState() {
@@ -111,6 +128,44 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     }
   }
 
+  Future<void> _onConfirm() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || _confirmBusy) return;
+    setState(() => _confirmBusy = true);
+    try {
+      await minisWaitForVideoControllerDuration(c);
+      if (!mounted) return;
+      var ms = c.value.duration.inMilliseconds;
+      // Nudge duration on some encoders (stuck at default 1s until after seek).
+      if (ms > 0 && ms < 2000) {
+        try {
+          final d = c.value.duration;
+          await c.seekTo(Duration(milliseconds: math.max(0, d.inMilliseconds - 200)));
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          if (mounted) {
+            ms = math.max(ms, c.value.duration.inMilliseconds);
+          }
+        } catch (_) {}
+      }
+      var fileMs = await minisResolveVideoDurationMsBestEffort(_path);
+      ms = math.max(ms, fileMs);
+      if (ms < 2000) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        fileMs = await minisResolveVideoDurationMs(_path);
+        ms = math.max(ms, fileMs);
+      }
+      if (ms <= 0) {
+        ms = 1;
+      }
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop<MinisVideoPreviewResult>(
+        MinisVideoPreviewResult(path: _path, durationMs: ms),
+      );
+    } finally {
+      if (mounted) setState(() => _confirmBusy = false);
+    }
+  }
+
   @override
   void dispose() {
     _controller?.removeListener(_onVideoTick);
@@ -134,7 +189,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     final showTrim = widget.allowReelTrim &&
         minisReelClipTrimmerPlatformSupported();
 
-    return PopScope<String?>(
+    return PopScope<MinisVideoPreviewResult?>(
       canPop: true,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) {
@@ -153,7 +208,8 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
           ),
           leading: IconButton(
             icon: const Icon(Icons.close),
-            onPressed: () => Navigator.of(context).pop<String?>(),
+            onPressed: () =>
+                Navigator.of(context, rootNavigator: true).pop<MinisVideoPreviewResult?>(),
           ),
           actions: [
             if (showTrim)
@@ -167,20 +223,33 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                         : _openTrim,
               ),
             TextButton(
-              onPressed:
-                  _initError != null || c == null || !c.value.isInitialized
-                      ? null
-                      : () => Navigator.of(context).pop<String?>(_path),
+              onPressed: _confirmBusy ||
+                      _initError != null ||
+                      c == null ||
+                      !c.value.isInitialized
+                  ? null
+                  : () => unawaited(_onConfirm()),
               style: TextButton.styleFrom(foregroundColor: Colors.white),
-              child: Text(
-                widget.confirmLabel,
-                overflow: TextOverflow.ellipsis,
-              ),
+              child: _confirmBusy
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(
+                      widget.confirmLabel,
+                      overflow: TextOverflow.ellipsis,
+                    ),
             ),
           ],
         ),
-        body: SafeArea(
-          child: _initError != null
+        body: Stack(
+          children: [
+            SafeArea(
+              child: _initError != null
               ? Center(
                   child: Padding(
                     padding: const EdgeInsets.all(24),
@@ -326,6 +395,39 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                         ),
                       ],
                     ),
+            ),
+            if (_confirmBusy)
+              Positioned.fill(
+                child: AbsorbPointer(
+                  child: ColoredBox(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    child: const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: Colors.white,
+                            ),
+                          ),
+                          SizedBox(height: 16),
+                          Text(
+                            'Preparing reel…',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );

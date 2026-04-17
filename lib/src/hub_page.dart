@@ -916,11 +916,12 @@ class _MinisVideoHubPageState extends State<MinisVideoHubPage> {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     final dir = await getTemporaryDirectory();
     final outPath = p.join(dir.path, 'minis_merge_$id.mp4');
-    final data = VideoRenderData(
+    final data = VideoRenderData.withQualityPreset(
       id: id,
       videoSegments: paths
           .map((path) => VideoSegment(video: EditorVideo.file(File(path))))
           .toList(),
+      qualityPreset: VideoQualityPreset.p1080High,
       outputFormat: VideoOutputFormat.mp4,
     );
 

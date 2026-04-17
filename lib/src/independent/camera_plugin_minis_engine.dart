@@ -45,7 +45,8 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
     _torchOn = false;
     final next = CameraController(
       description,
-      ResolutionPreset.high,
+      // ~1080p target; [high] is ~720p and looks soft next to merged exports.
+      ResolutionPreset.veryHigh,
       enableAudio: enableAudio,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );

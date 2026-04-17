@@ -27,11 +27,17 @@ bool minisPathLooksLikeAudio(String path) {
   return kMinisAudioFileExtensions.contains(ext);
 }
 
+/// Writes under app documents (same durable root as Minis capture handoff),
+/// not [getTemporaryDirectory], so the host can copy/read the file after routes pop.
 Future<String> _writeEditedJpeg(Uint8List bytes) async {
-  final dir = await getTemporaryDirectory();
+  final base = await getApplicationDocumentsDirectory();
+  final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+  if (!await dir.exists()) {
+    await dir.create(recursive: true);
+  }
   final out = p.join(
     dir.path,
-    'minis_pro_edit_${DateTime.now().millisecondsSinceEpoch}.jpg',
+    'minis_pro_edit_${DateTime.now().microsecondsSinceEpoch}.jpg',
   );
   await File(out).writeAsBytes(bytes, flush: true);
   return out;
@@ -49,7 +55,7 @@ Future<String?> openMinisProImageEditor(
     return Future.value(null);
   }
 
-  return Navigator.of(context).push<String?>(
+  return Navigator.of(context, rootNavigator: true).push<String?>(
     MaterialPageRoute<String?>(
       fullscreenDialog: true,
       builder: (editorCtx) => ProImageEditor.file(
@@ -81,7 +87,7 @@ Future<String?> openMinisProImageEditor(
 }
 
 /// Opens [MinisVideoPreviewPage] (play, scrub, optional trim, confirm).
-Future<String?> openMinisVideoPreview(
+Future<MinisVideoPreviewResult?> openMinisVideoPreview(
   BuildContext context,
   String videoPath, {
   bool allowReelTrim = false,

@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Example is Android / iOS only — ignore desktop scaffold if generated locally
+/windows/
+/linux/

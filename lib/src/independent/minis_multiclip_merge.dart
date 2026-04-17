@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pro_video_editor/pro_video_editor.dart';
 
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
+import 'package:loopit_minis/src/session_and_toast.dart';
 
 /// Same platforms as [proVideoEditorRenderExportSupported] in hub (no web).
 bool minisMulticlipMergeSupported() {
@@ -41,10 +42,9 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   if (clipPaths.isEmpty) return null;
   if (!minisMulticlipMergeSupported()) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Merging clips requires Android, iOS, or macOS.'),
-        ),
+      showMinisToast(
+        context,
+        'Merging clips requires Android, iOS, or macOS.',
       );
     }
     return null;
@@ -52,9 +52,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   for (final path in clipPaths) {
     if (!File(path).existsSync()) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Clip missing: $path')),
-        );
+        showMinisToast(context, 'Clip missing: $path');
       }
       return null;
     }
@@ -71,9 +69,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
     final audioFile = File(music);
     if (!audioFile.existsSync()) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Music file not found: $music')),
-        );
+        showMinisToast(context, 'Music file not found: $music');
       }
     } else {
       audioTracks = [
@@ -91,7 +87,14 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   final duckClipAudio = audioTracks.isNotEmpty;
   final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
 
-  final data = VideoRenderData(
+  // Use the same quality path as hub export: plain [VideoRenderData] omits
+  // [qualityConfig]/bitrate and the encoder can fall back to a much lower
+  // output than the camera-captured clips.
+  // Explicit 1:1 scale skips [VideoRenderData.toAsyncMap]'s metadata-driven
+  // fit (getMetadata on first segment). That probe can throw METADATA_ERROR
+  // / setDataSource failures for some temp or gallery paths while export
+  // would still succeed with fixed scales + quality bitrate.
+  final data = VideoRenderData.withQualityPreset(
     id: id,
     videoSegments: clipPaths
         .map(
@@ -101,10 +104,12 @@ Future<String?> mergeMinisVideoClipsWithDialog({
           ),
         )
         .toList(),
+    qualityPreset: VideoQualityPreset.p1080High,
     outputFormat: VideoOutputFormat.mp4,
     playbackSpeed: playbackSpeed,
     enableAudio: enableAudio,
     audioTracks: audioTracks,
+    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
   );
 
   final future = ProVideoEditor.instance.renderVideoToFile(outPath, data);
