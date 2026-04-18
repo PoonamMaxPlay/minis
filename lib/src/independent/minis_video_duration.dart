@@ -168,25 +168,47 @@ Future<int> _resolveGalleryFileDurationMs(
 
   int best = 0;
   try {
-    debugPrint('Racing both probers (8s timeout)...');
-    final results = await Future.wait([metaFuture, playerFuture]).timeout(
-      const Duration(seconds: 8),
+    debugPrint('Racing both probers (early exit on first valid)...');
+    
+    final completer = Completer<int>();
+    int completedCount = 0;
+    
+    void checkDone(int val) {
+      if (val > best) best = val;
+      completedCount++;
+      if (!completer.isCompleted) {
+        if (val > 0) {
+           completer.complete(val);
+        } else if (completedCount == 2) {
+           completer.complete(best);
+        }
+      }
+    }
+    
+    metaFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
+    playerFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
+    
+    best = await completer.future.timeout(
+      const Duration(seconds: 4),
       onTimeout: () {
-        debugPrint('ERROR: Future.wait TIMED OUT after 8 seconds!');
-        return [0, 0];
+        debugPrint('ERROR: Race timed out, using best=$best');
+        return best;
       },
     );
-    debugPrint('Results: Meta=${results[0]}ms, Player=${results[1]}ms');
-    for (final r in results) {
-      if (r > best) best = r;
-    }
+    debugPrint('Race completed. Best raw probe: $best');
   } catch (e, st) {
-    debugPrint('ERROR: Exception during Future.wait: $e\n$st');
-    try {
-      final m = await metaFuture;
-      debugPrint('Fallback meta result: $m');
-      if (m > best) best = m;
-    } catch (_) {}
+    debugPrint('ERROR: Exception during race: $e\n$st');
+  }
+
+  if (best <= 2000) {
+    final len = await file.length();
+    if (len > 48 * 1024) {
+      debugPrint('MINIS: Probes returned $best for a large file. Using 60s fallback.');
+      best = 60000;
+    } else if (best <= 0) {
+      debugPrint('MINIS: Probes failed to read metadata. Using 60s fallback.');
+      best = 60000;
+    }
   }
 
   final endTime = DateTime.now();
@@ -237,11 +259,18 @@ Future<int> minisFinalizeClipDurationMs(
   bool fromGalleryPreview = false,
   bool fromGalleryFile = false,
 }) async {
+  debugPrint('======================================');
+  debugPrint('MINIS: minisFinalizeClipDurationMs');
+  debugPrint('MINIS: reportedMs=$reportedMs, fromGalleryPreview=$fromGalleryPreview, fromGalleryFile=$fromGalleryFile');
+  debugPrint('======================================');
+  
   // Fast path: gallery / media-library files are fully written.
   if (fromGalleryFile || fromGalleryPreview) {
+    debugPrint('MINIS: Using _resolveGalleryFileDurationMs (fast path)');
     return _resolveGalleryFileDurationMs(filePath, reportedMs);
   }
 
+  debugPrint('MINIS: Using slow path for freshly recorded clip');
   // Slow path: freshly recorded camera clip.
   final r = reportedMs.clamp(1, 1 << 30);
   var probed = await minisResolveVideoDurationMsBestEffort(filePath);

@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:audio_waveforms/audio_waveforms.dart';
 import 'package:file_picker/file_picker.dart';
@@ -923,10 +922,15 @@ class _MinisIndependentCaptureScreenState
       // cached temp file, so we own it and can move it. Copying a 500MB video
       // takes several seconds of blocking I/O and causes massive UI lag.
       try {
+        final startRename = DateTime.now();
         await src.rename(dest.path);
+        debugPrint('minis: materialize rename took ${DateTime.now().difference(startRename).inMilliseconds}ms');
       } catch (_) {
         // Fallback to full copy if cross-filesystem or permission issues.
+        final startCopy = DateTime.now();
+        debugPrint('minis: materialize rename failed, falling back to copy...');
         await src.copy(dest.path);
+        debugPrint('minis: materialize copy took ${DateTime.now().difference(startCopy).inMilliseconds}ms');
         try {
           await src.delete(); // cleanup original if copy succeeds
         } catch (_) {}
@@ -1006,26 +1010,23 @@ class _MinisIndependentCaptureScreenState
         );
       }
     } catch (e, st) {
-      debugPrint('minis _appendVideoSegment duration failed: $e\n$st');
+      debugPrint('MINIS: _appendVideoSegment duration failed: $e\n$st');
       if (mounted) {
         _toast(minisUserFriendlyException(e, context: 'duration'));
       }
       return false;
     }
-    _logMulticlip(
-      '_appendVideoSegment finalizedMs=$useMs reportedMs=$durationMs '
-      'path=${p.basename(filePath)}',
-    );
+    
+    debugPrint('MINIS: _appendVideoSegment got useMs=$useMs');
 
-    // Bug 1 fix: reject clips where finalization returned a suspiciously short
-    // duration (the common Android ~1s placeholder) for a non-trivial file.
-    // Adding a 1ms clip silently corrupts the reel time counter.
     if (useMs < 500) {
+      debugPrint('MINIS: REJECTING because useMs ($useMs) < 500');
       int fileLen = 0;
       try {
         fileLen = await File(filePath).length();
       } catch (_) {}
       if (fileLen > 48 * 1024) {
+        debugPrint('MINIS: File is large ($fileLen B), rejecting with toast');
         _logMulticlip(
           '_appendVideoSegment REJECT: useMs=$useMs is suspiciously short '
           'for a ${fileLen}B file — metadata not yet readable. Try again.',
@@ -1036,6 +1037,8 @@ class _MinisIndependentCaptureScreenState
           );
         }
         return false;
+      } else {
+        debugPrint('MINIS: File is small ($fileLen B), allowing short clip');
       }
     }
 
@@ -1186,12 +1189,22 @@ class _MinisIndependentCaptureScreenState
       final previewMsArg = previewDurationMs;
       final reported =
           (previewMsArg != null && previewMsArg > 0) ? previewMsArg : 1;
+          
+      debugPrint('======================================');
+      debugPrint('MINIS: _appendGalleryVideoAfterPreview');
+      debugPrint('MINIS: previewDurationMs=$previewDurationMs, reported=$reported');
+      debugPrint('======================================');
+      
       final clipMs = await minisFinalizeClipDurationMs(
         reported,
         confirmedPath,
         fromGalleryPreview:
             previewDurationMs != null && previewDurationMs >= 3000,
+        fromGalleryFile: true,
       );
+      
+      debugPrint('MINIS: clipMs returned from finalize=$clipMs');
+      
       _logMulticlip(
         'duration after preview finalize: clipMs=$clipMs reported=$reported '
         'path=${p.basename(confirmedPath)}',
@@ -1204,6 +1217,7 @@ class _MinisIndependentCaptureScreenState
         'capMs=$cap sumIfAdded=$sum',
       );
       if (clipMs <= 0) {
+        debugPrint('MINIS: REJECTING DUE TO clipMs <= 0 (it is $clipMs)');
         _logMulticlip('REJECT: clipMs<=0 (metadata/probe failed)');
         _toast(
           'Could not read this video length. Try another file or export as MP4.',
@@ -1211,6 +1225,7 @@ class _MinisIndependentCaptureScreenState
         return;
       }
       if (sum > cap) {
+        debugPrint('MINIS: REJECTING DUE TO sum > cap ($sum > $cap)');
         _logMulticlip(
           'REJECT: over cap after preview (sum=$sum cap=$cap) — should be rare',
         );
@@ -1218,6 +1233,7 @@ class _MinisIndependentCaptureScreenState
         return;
       }
       _logMulticlip('calling _appendVideoSegment');
+      debugPrint('MINIS: calling _appendVideoSegment with $clipMs');
       await _appendVideoSegment(
         confirmedPath,
         clipMs,
