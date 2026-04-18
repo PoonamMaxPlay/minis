@@ -55,6 +55,8 @@ Future<String?> openMinisProImageEditor(
     return Future.value(null);
   }
 
+  bool _popped = false;
+
   return Navigator.of(context, rootNavigator: true).push<String?>(
     MaterialPageRoute<String?>(
       fullscreenDialog: true,
@@ -70,15 +72,22 @@ Future<String?> openMinisProImageEditor(
           onImageEditingComplete: (Uint8List bytes) async {
             try {
               final out = await _writeEditedJpeg(bytes);
-              if (editorCtx.mounted) {
+              if (!_popped && editorCtx.mounted) {
+                _popped = true;
                 Navigator.of(editorCtx).pop(out);
               }
             } catch (_) {
-              if (editorCtx.mounted) Navigator.of(editorCtx).pop();
+              if (!_popped && editorCtx.mounted) {
+                _popped = true;
+                Navigator.of(editorCtx).pop();
+              }
             }
           },
           onCloseEditor: () {
-            if (editorCtx.mounted) Navigator.of(editorCtx).pop();
+            if (!_popped && editorCtx.mounted) {
+              _popped = true;
+              Navigator.of(editorCtx).pop();
+            }
           },
         ),
       ),

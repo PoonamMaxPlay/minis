@@ -613,6 +613,7 @@ class _MinisVideoHubPageState extends State<MinisVideoHubPage> {
   Future<String?> _openProImageEditorForOverlay() async {
     if (!mounted) return null;
     String? outPath;
+    bool _popped = false;
     await Navigator.of(context, rootNavigator: true).push<void>(
       MaterialPageRoute<void>(
         fullscreenDialog: true,
@@ -638,12 +639,14 @@ class _MinisVideoHubPageState extends State<MinisVideoHubPage> {
                 if (mounted) _toast('Could not save overlay: $e');
                 outPath = null;
               }
-              if (editorCtx.mounted) {
+              if (!_popped && editorCtx.mounted) {
+                _popped = true;
                 Navigator.of(editorCtx).pop();
               }
             },
             onCloseEditor: () {
-              if (editorCtx.mounted) {
+              if (!_popped && editorCtx.mounted) {
+                _popped = true;
                 Navigator.of(editorCtx).pop();
               }
             },
