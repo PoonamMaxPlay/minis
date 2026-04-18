@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:pro_video_editor/pro_video_editor.dart';
 import 'package:video_player/video_player.dart';
+import 'package:video_compress/video_compress.dart';
 
 /// Duration from ProVideoEditor metadata only (no extra [VideoPlayer]). Fast; pair with preview duration.
 Future<int> minisResolveVideoDurationMsMetadataOnly(String filePath) async {
@@ -165,10 +166,11 @@ Future<int> _resolveGalleryFileDurationMs(
 
   final metaFuture = _probeViaMeta(file);
   final playerFuture = _durationMsViaVideoPlayer(file);
+  final compressFuture = _probeViaVideoCompress(filePath);
 
   int best = 0;
   try {
-    debugPrint('Racing both probers (early exit on first valid)...');
+    debugPrint('Racing all 3 probers (early exit on first valid)...');
     
     final completer = Completer<int>();
     int completedCount = 0;
@@ -177,9 +179,9 @@ Future<int> _resolveGalleryFileDurationMs(
       if (val > best) best = val;
       completedCount++;
       if (!completer.isCompleted) {
-        if (val > 0) {
+        if (val > 1000) {
            completer.complete(val);
-        } else if (completedCount == 2) {
+        } else if (completedCount == 3) {
            completer.complete(best);
         }
       }
@@ -187,9 +189,10 @@ Future<int> _resolveGalleryFileDurationMs(
     
     metaFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
     playerFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
+    compressFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
     
     best = await completer.future.timeout(
-      const Duration(seconds: 4),
+      const Duration(seconds: 12),
       onTimeout: () {
         debugPrint('ERROR: Race timed out, using best=$best');
         return best;
@@ -203,8 +206,15 @@ Future<int> _resolveGalleryFileDurationMs(
   if (best <= 2000) {
     final len = await file.length();
     if (len > 48 * 1024) {
-      debugPrint('MINIS: Probes returned $best for a large file. Using 60s fallback.');
-      best = 60000;
+      // Estimate based on an average bitrate of ~312 KB/sec for a 720p H.264 file.
+      // (1 MB = ~3 seconds, so ~340 KB/sec). We use 280 KB/sec to be safe.
+      final estimatedSec = len / (280 * 1024);
+      int fallbackMs = (estimatedSec * 1000).toInt();
+      if (fallbackMs > 180000) fallbackMs = 180000;
+      if (fallbackMs < 5000) fallbackMs = 5000;
+      
+      debugPrint('MINIS: Probes failed/returned $best for a large file (${len} bytes). Estimated ${fallbackMs}ms instead of fixed 180s.');
+      best = fallbackMs;
     } else if (best <= 0) {
       debugPrint('MINIS: Probes failed to read metadata. Using 60s fallback.');
       best = 60000;
@@ -233,6 +243,19 @@ Future<int> _probeViaMeta(File file) async {
     return meta.duration.inMilliseconds.clamp(0, 1 << 30);
   } catch (e, st) {
     debugPrint('[_probeViaMeta] Failed: $e\n$st');
+    return 0;
+  }
+}
+
+Future<int> _probeViaVideoCompress(String filePath) async {
+  try {
+    debugPrint('[_probeViaVideoCompress] Starting VideoCompress metadata read...');
+    final info = await VideoCompress.getMediaInfo(filePath);
+    final durationMs = info.duration?.toInt() ?? 0;
+    debugPrint('[_probeViaVideoCompress] Success! duration=${durationMs}ms');
+    return durationMs;
+  } catch (e, st) {
+    debugPrint('[_probeViaVideoCompress] Failed: $e\n$st');
     return 0;
   }
 }

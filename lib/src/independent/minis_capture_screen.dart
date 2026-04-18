@@ -67,7 +67,7 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
     super.key,
     this.engine,
     this.permissionPolicy = MinisCapturePermissionPolicy.request,
-    this.maxRecordingDuration = const Duration(seconds: 60),
+    this.maxRecordingDuration = const Duration(seconds: 180),
     this.onClipConfirmed,
     this.initialMusicPath,
     this.initialMusicStartMs = 0,

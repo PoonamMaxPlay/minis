@@ -91,11 +91,18 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   String? _playbackErrorText;
   bool _scrubbing = false;
   bool _confirmBusy = false;
+  int? _probedDurationMs;
 
   @override
   void initState() {
     super.initState();
     _path = widget.videoPath;
+    
+    // Asynchronously probe duration in case VideoPlayer fails to read it.
+    minisFinalizeClipDurationMs(1, _path, fromGalleryFile: true).then((ms) {
+      if (mounted) setState(() => _probedDurationMs = ms);
+    });
+    
     unawaited(_initPlaybackAsync());
   }
 
@@ -250,9 +257,10 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       }
       // Release preview decoder before any standalone probe — mandatory on Android
       // when opening another player on the same path.
+      final oldC = _controller;
       _controller?.removeListener(_onVideoTick);
-      await _controller?.dispose();
-      _controller = null;
+      setState(() => _controller = null);
+      await oldC?.dispose();
       if (!mounted) return;
 
       try {
@@ -308,9 +316,10 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     final pathForResult = _path;
     try {
       // Release any half-initialized decoder before duration probes run.
+      final oldC = _controller;
       _controller?.removeListener(_onVideoTick);
-      await _controller?.dispose();
-      _controller = null;
+      setState(() => _controller = null);
+      await oldC?.dispose();
 
       final ms = await minisFinalizeClipDurationMs(
         1,
@@ -580,15 +589,22 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                                         ),
                                       ),
                                       const Spacer(),
-                                      Text(
-                                        _formatDuration(c.value.duration),
-                                        style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 13,
-                                          fontFeatures: [
-                                            FontFeature.tabularFigures(),
-                                          ],
-                                        ),
+                                      Builder(
+                                        builder: (context) {
+                                          final int ms = (c.value.duration.inMilliseconds > 0)
+                                              ? c.value.duration.inMilliseconds
+                                              : (_probedDurationMs ?? 0);
+                                          return Text(
+                                            _formatDuration(Duration(milliseconds: ms)),
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 13,
+                                              fontFeatures: [
+                                                FontFeature.tabularFigures(),
+                                              ],
+                                            ),
+                                          );
+                                        },
                                       ),
                                     ],
                                   ),
@@ -603,30 +619,31 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                                         overlayRadius: 16,
                                       ),
                                     ),
-                                    child: Slider(
-                                      value: c.value.duration.inMilliseconds > 0
-                                          ? c.value.position.inMilliseconds
-                                              .clamp(
-                                                0,
-                                                c.value.duration.inMilliseconds,
-                                              )
-                                              .toDouble()
-                                          : 0,
-                                      max: c.value.duration.inMilliseconds > 0
-                                          ? c.value.duration.inMilliseconds
-                                              .toDouble()
-                                          : 1,
-                                      onChangeStart: (_) {
-                                        _scrubbing = true;
-                                      },
-                                      onChanged: (v) {
-                                        c.seekTo(
-                                          Duration(milliseconds: v.round()),
+                                    child: Builder(
+                                      builder: (context) {
+                                        final int ms = (c.value.duration.inMilliseconds > 0)
+                                            ? c.value.duration.inMilliseconds
+                                            : (_probedDurationMs ?? 0);
+                                        return Slider(
+                                          value: ms > 0
+                                              ? c.value.position.inMilliseconds
+                                                  .clamp(0, ms)
+                                                  .toDouble()
+                                              : 0,
+                                          max: ms > 0 ? ms.toDouble() : 1,
+                                          onChangeStart: (_) {
+                                            _scrubbing = true;
+                                          },
+                                          onChanged: (v) {
+                                            c.seekTo(
+                                              Duration(milliseconds: v.round()),
+                                            );
+                                            setState(() {});
+                                          },
+                                          onChangeEnd: (_) {
+                                            _scrubbing = false;
+                                          },
                                         );
-                                        setState(() {});
-                                      },
-                                      onChangeEnd: (_) {
-                                        _scrubbing = false;
                                       },
                                     ),
                                   ),

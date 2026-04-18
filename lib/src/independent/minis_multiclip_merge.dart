@@ -164,12 +164,37 @@ class _MinisClipMergeProgressDialog extends StatefulWidget {
 
 class _MinisClipMergeProgressDialogState
     extends State<_MinisClipMergeProgressDialog> {
+  double _simulatedProgress = 0.0;
+  Timer? _simTimer;
+
   @override
   void initState() {
     super.initState();
+    // Native FFmpeg often stalls at 0% when duration metadata is missing.
+    // Simulate progress up to 92% over ~45 seconds so the UI isn't dead.
+    _simTimer = Timer.periodic(const Duration(milliseconds: 500), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      setState(() {
+        if (_simulatedProgress < 0.92) {
+          // Slows down as it gets closer to 90%
+          _simulatedProgress += 0.01 * (1.0 - _simulatedProgress);
+        }
+      });
+    });
+
     widget.renderFuture.whenComplete(() {
+      _simTimer?.cancel();
       if (mounted) Navigator.of(context).pop();
     });
+  }
+
+  @override
+  void dispose() {
+    _simTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -179,16 +204,22 @@ class _MinisClipMergeProgressDialogState
       content: StreamBuilder<ProgressModel>(
         stream: ProVideoEditor.instance.progressStreamById(widget.taskId),
         builder: (context, snap) {
-          final v = snap.data?.progress;
+          double? nativeProgress = snap.data?.progress;
+          
+          if (nativeProgress != null && nativeProgress > 0.01) {
+            // Native stream is working correctly, stop simulation.
+            _simTimer?.cancel();
+          } else {
+            // Use simulation if native is stuck at 0 or null.
+            nativeProgress = _simulatedProgress;
+          }
+
           return Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (v != null)
-                LinearProgressIndicator(value: v)
-              else
-                const LinearProgressIndicator(),
+              LinearProgressIndicator(value: nativeProgress),
               const SizedBox(height: 12),
-              Text(v != null ? '${(v * 100).toStringAsFixed(0)}%' : 'Starting'),
+              Text('${(nativeProgress * 100).toStringAsFixed(0)}%'),
             ],
           );
         },
@@ -196,7 +227,10 @@ class _MinisClipMergeProgressDialogState
       actions: [
         if (widget.canCancel)
           TextButton(
-            onPressed: () => widget.onCancel(),
+            onPressed: () {
+              _simTimer?.cancel();
+              widget.onCancel();
+            },
             child: const Text('Cancel'),
           ),
       ],
