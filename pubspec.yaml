@@ -30,13 +30,6 @@ dependencies:
   video_trimmer: 5.0.0
   video_compress: ^3.1.4
 
-dependency_overrides:
-  # Media3 trim optimization can fail with IllegalClippingException on some MP4s; see patches/.
-  flutter_native_video_trimmer:
-    path: ../patches/flutter_native_video_trimmer
-  # Thumbnail strip: brief delay between decodes (Android MediaCodec reclaim warnings).
-  video_trimmer:
-    path: ../patches/video_trimmer
 
 dev_dependencies:
   flutter_test:
