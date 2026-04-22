@@ -174,7 +174,7 @@ class _MinisIndependentCaptureScreenState
   bool _lastCaptureIsVideo = false;
   bool _micEnabled = true;
   bool _railExpanded = true;
-  MinisRecordCountdownMode _countdownMode = MinisRecordCountdownMode.three;
+  MinisRecordCountdownMode _countdownMode = MinisRecordCountdownMode.off;
   bool _countingDown = false;
   int? _countdownTick;
   Timer? _maxRecordTimer;
@@ -215,6 +215,11 @@ class _MinisIndependentCaptureScreenState
   @override
   void initState() {
     super.initState();
+    // Lock orientation to portrait when entering capture screen
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+    ]);
+
     if (kIsWeb) {
       _webUnsupported = true;
       _busy = false;
@@ -434,6 +439,14 @@ class _MinisIndependentCaptureScreenState
 
   @override
   void dispose() {
+    // Reset orientations when leaving capture screen
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+
     _maxRecordTimer?.cancel();
     _holdStartTimer?.cancel();
     _clipElapsedTicker?.cancel();
@@ -633,7 +646,7 @@ class _MinisIndependentCaptureScreenState
   String get _timerRailLabel {
     switch (_countdownMode) {
       case MinisRecordCountdownMode.off:
-        return 'Off';
+        return '0s';
       case MinisRecordCountdownMode.three:
         return '3s';
       case MinisRecordCountdownMode.ten:
