@@ -123,6 +123,19 @@ bool _pickedXFileIsVideo(XFile x) {
   return false;
 }
 
+/// Some pickers return `file:///...` URIs; [File.exists] needs a real path.
+String _normalizeLocalPickerPath(String raw) {
+  var s = raw.trim();
+  if (s.isEmpty) return s;
+  if (s.startsWith('file:')) {
+    try {
+      final filePath = Uri.parse(s).toFilePath();
+      if (filePath.isNotEmpty) return filePath;
+    } catch (_) {}
+  }
+  return s;
+}
+
 class _MinisIndependentCaptureScreenState
     extends State<MinisIndependentCaptureScreen> with TickerProviderStateMixin {
   static const double _kRailIconSize = 25;
@@ -149,6 +162,9 @@ class _MinisIndependentCaptureScreenState
   void _logMulticlip(String message) {
     debugPrint('MINIS_MULTICLIP: $message');
   }
+
+  /// Same sink as [_logMulticlip] — some devices drop unrelated [debugPrint] prefixes.
+  void _logGallery(String message) => _logMulticlip('gallery: $message');
 
   void _logMulticlipState(String tag) {
     final rem = _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
@@ -905,7 +921,12 @@ class _MinisIndependentCaptureScreenState
   Future<String?> _materializePickedVideoForPreview(String sourcePath) async {
     try {
       final src = File(sourcePath);
-      if (!await src.exists()) return null;
+      final exists = await src.exists();
+      _logGallery(
+        'materialize exists=$exists srcLen=${sourcePath.length} '
+        'tail=${sourcePath.length > 80 ? sourcePath.substring(sourcePath.length - 80) : sourcePath}',
+      );
+      if (!exists) return null;
       final base = await getApplicationDocumentsDirectory();
       final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
       if (!await dir.exists()) await dir.create(recursive: true);
@@ -936,10 +957,425 @@ class _MinisIndependentCaptureScreenState
         } catch (_) {}
       }
       
-      return dest.path.replaceAll('\\', '/');
+      final out = dest.path.replaceAll('\\', '/');
+      _logGallery('materialize OK out=${p.basename(out)}');
+      return out;
     } catch (e) {
-      debugPrint('minis: materialize gallery video failed: $e');
+      _logGallery('materialize failed: $e');
       return null;
+    }
+  }
+
+  /// When [FilePicker] returns no filesystem path (or path is invalid), copy bytes/stream.
+  Future<String?> _materializePlatformFileAsGallerySource(PlatformFile file) async {
+    _logGallery(
+      'platformFile name=${file.name} size=${file.size} pathNull=${file.path == null} ext=${file.extension}',
+    );
+    final path = file.path;
+    if (path != null && path.isNotEmpty) {
+      try {
+        final n = _normalizeLocalPickerPath(path);
+        final ok = await File(n).exists();
+        _logGallery('platformFile path normalizedExists=$ok');
+        if (ok) return n;
+      } catch (e) {
+        _logGallery('platformFile path error: $e');
+      }
+    }
+    final stream = file.readStream;
+    if (stream != null) {
+      try {
+        final base = await getApplicationDocumentsDirectory();
+        final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+        if (!await dir.exists()) await dir.create(recursive: true);
+        final ext = (file.extension != null && file.extension!.isNotEmpty)
+            ? '.${file.extension!}'
+            : '.mp4';
+        final dest = File(
+          p.join(
+            dir.path,
+            'minis_gallery_pick_${DateTime.now().microsecondsSinceEpoch}$ext',
+          ),
+        );
+        final sink = dest.openWrite();
+        try {
+          await for (final chunk in stream) {
+            sink.add(chunk);
+          }
+        } finally {
+          await sink.close();
+        }
+        if (!await dest.exists() || await dest.length() == 0) {
+          _logGallery('stream copy empty or missing');
+          return null;
+        }
+        _logGallery('stream copy OK ${p.basename(dest.path)}');
+        return dest.path;
+      } catch (e) {
+        _logGallery('stream copy failed: $e');
+        return null;
+      }
+    }
+    final bytes = file.bytes;
+    if (bytes != null && bytes.isNotEmpty) {
+      try {
+        final base = await getApplicationDocumentsDirectory();
+        final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+        if (!await dir.exists()) await dir.create(recursive: true);
+        final ext = (file.extension != null && file.extension!.isNotEmpty)
+            ? '.${file.extension!}'
+            : '.mp4';
+        final dest = File(
+          p.join(
+            dir.path,
+            'minis_gallery_pick_${DateTime.now().microsecondsSinceEpoch}$ext',
+          ),
+        );
+        await dest.writeAsBytes(bytes, flush: true);
+        _logGallery('bytes copy OK ${p.basename(dest.path)}');
+        return dest.path;
+      } catch (e) {
+        _logGallery('bytes write failed: $e');
+        return null;
+      }
+    }
+    _logGallery('platformFile no path/stream/bytes');
+    return null;
+  }
+
+  /// Resolves a [PlatformFile] from [FilePicker] to a local path [File] can open.
+  Future<String?> _resolveLocalPathFromPlatformFile(PlatformFile f) async {
+    final rawPath = f.path;
+    String? src;
+    if (rawPath != null && rawPath.isNotEmpty) {
+      src = _normalizeLocalPickerPath(rawPath);
+      _logGallery('resolvePlatformFile raw pathLen=${rawPath.length}');
+      try {
+        final ex = await File(src).exists();
+        _logGallery('resolvePlatformFile normalized exists=$ex');
+        if (!ex) src = null;
+      } catch (e) {
+        _logGallery('resolvePlatformFile File.exists error: $e');
+        src = null;
+      }
+    } else {
+      _logGallery('resolvePlatformFile no path — stream/bytes');
+    }
+    src ??= await _materializePlatformFileAsGallerySource(f);
+    if (src == null || src.isEmpty) return null;
+    _logGallery(
+      'resolvePlatformFile tail=${src.length > 80 ? src.substring(src.length - 80) : src}',
+    );
+    return src;
+  }
+
+  /// Story / feed-style Minis (**!videoOnly**): [pickMedia] hangs or returns null on
+  /// many Android devices; [FileType.media] matches photos + videos in one picker.
+  ///
+  /// Returns `true` if the flow finished here (success, cancel, or handled error).
+  /// Returns `false` to fall back to [ImagePicker] (rare plugin failure).
+  Future<bool> _openGalleryMixedMediaViaFilePicker() async {
+    _logGallery('FilePicker(FileType.media) story/mixed');
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.media,
+        allowMultiple: false,
+        withReadStream: defaultTargetPlatform == TargetPlatform.android,
+      );
+      _logGallery(
+        'FilePicker media back null=${result == null} count=${result?.files.length ?? 0}',
+      );
+      if (result == null || result.files.isEmpty) {
+        _logGallery('FilePicker media cancel or empty');
+        return true;
+      }
+      final f = result.files.single;
+      final path = await _resolveLocalPathFromPlatformFile(f);
+      if (path == null || path.isEmpty) {
+        _logGallery('mixed pick could not resolve path');
+        _toast('Could not read the selected file.');
+        return true;
+      }
+      if (!mounted) return true;
+
+      final isVideo = _pickedXFileIsVideo(XFile(path, name: f.name));
+      _logGallery('mixed pick isVideo=$isVideo file=${p.basename(path)}');
+      _logMulticlip(
+        'picked path=${p.basename(path)} isVideo=$isVideo mime=(filePicker)',
+      );
+
+      if (!isVideo) {
+        final edited = await openMinisProImageEditor(context, path);
+        if (!mounted) return true;
+        if (edited != null && edited.isNotEmpty) {
+          debugPrint('MINIS_FLOW capture: gallery image edited path=$edited');
+          _deliverConfirmedCapture(edited);
+        } else {
+          _toast('Image edit cancelled');
+        }
+        return true;
+      }
+
+      await _importPickedGalleryVideoFromSourcePath(path);
+      return true;
+    } catch (e, st) {
+      _logGallery('FilePicker media error: $e\n$st');
+      return false;
+    }
+  }
+
+  /// Minis / reels (**videoOnly**): use native file/video document picker. On many
+  /// Android devices [ImagePicker.pickVideo] returns `null` even after the user
+  /// picks a clip (Photo Picker / OEM quirks); [FilePicker] is reliable here.
+  Future<void> _openGalleryVideoViaFilePicker() async {
+    _logGallery('FilePicker(FileType.video) starting');
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+      // Android often omits [PlatformFile.path] for SAF URIs — stream still works.
+      withReadStream: defaultTargetPlatform == TargetPlatform.android,
+    );
+    _logGallery(
+      'FilePicker back null=${result == null} count=${result?.files.length ?? 0}',
+    );
+    if (result == null || result.files.isEmpty) {
+      _logGallery('FilePicker cancel or empty');
+      return;
+    }
+    final f = result.files.single;
+    final src = await _resolveLocalPathFromPlatformFile(f);
+    if (src == null || src.isEmpty) {
+      _logGallery('no source after FilePicker');
+      _toast('Could not read the selected video file.');
+      return;
+    }
+    await _importPickedGalleryVideoFromSourcePath(src);
+  }
+
+  /// Materialize, preview, and append — shared by [ImagePicker] and desktop [FilePicker].
+  Future<void> _importPickedGalleryVideoFromSourcePath(String sourcePath) async {
+    _logGallery(
+      'import enter mergeSupported=${minisMulticlipMergeSupported()}',
+    );
+    _applyBusy(true, message: 'Saving video…');
+    String? materialized;
+    try {
+      materialized = await _materializePickedVideoForPreview(sourcePath);
+    } catch (e, st) {
+      debugPrint('minis materialize: $e\n$st');
+      if (mounted) {
+        _toast(minisUserFriendlyException(e));
+      }
+      return;
+    } finally {
+      if (mounted) {
+        _applyBusy(false);
+      }
+    }
+    if (!mounted) {
+      _logGallery('import ABORT not mounted after materialize');
+      _logMulticlip('ABORT after materialize: not mounted');
+      return;
+    }
+    if (materialized == null) {
+      _logGallery('import REJECT materialized=null');
+      _logMulticlip('REJECT: materialize copy failed (null path)');
+      _toast('Could not read the selected video file.');
+      return;
+    }
+    _logMulticlip('materialized to=${p.basename(materialized)}');
+    _logGallery(
+      'materialized ${p.basename(materialized)} len=${materialized.length}',
+    );
+
+    if (!minisMulticlipMergeSupported()) {
+      _logGallery('single-clip → openMinisVideoPreview');
+      final preview = await openMinisVideoPreview(context, materialized);
+      _logGallery(
+        'preview back null=${preview == null} path=${preview?.path != null ? p.basename(preview!.path) : 'n/a'}',
+      );
+      if (!mounted) {
+        _logGallery('preview ABORT not mounted');
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+        return;
+      }
+      if (preview != null && preview.path.isNotEmpty) {
+        _applyBusy(true, message: 'Adding clip…');
+        try {
+          await _appendGalleryVideoAfterPreview(
+            preview.path,
+            previewDurationMs: preview.durationMs,
+          );
+        } finally {
+          if (mounted) {
+            _applyBusy(false);
+          }
+        }
+      } else {
+        _logGallery('preview dismissed or empty');
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+        _toast('Video preview dismissed');
+      }
+      return;
+    }
+
+    _logGallery('multiclip → duration probe');
+    final remainingMs =
+        _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
+    if (remainingMs < 500) {
+      _toast('No time left on this reel.');
+      try {
+        await File(materialized).delete();
+      } catch (_) {}
+      return;
+    }
+
+    var clipMsProbe = 0;
+    _applyBusy(true, message: 'Reading video…');
+    try {
+      clipMsProbe = await minisFinalizeClipDurationMs(
+        0,
+        materialized,
+        fromGalleryFile: true,
+      );
+    } catch (e, st) {
+      debugPrint('minis gallery probe: $e\n$st');
+      if (mounted) {
+        _toast(minisUserFriendlyException(e, context: 'duration'));
+      }
+      return;
+    } finally {
+      if (mounted) {
+        _applyBusy(false);
+      }
+    }
+
+    _logMulticlip(
+      'gallery probe (pre-preview): clipMs=$clipMsProbe remainingBudgetMs=$remainingMs '
+      'sessionCapMs=$_sessionCapMs usedMs=$_clipsTotalDurationMs',
+    );
+
+    if (clipMsProbe > 0 && clipMsProbe > remainingMs) {
+      if (!minisReelClipTrimmerPlatformSupported()) {
+        _toast(
+          'This video is longer than the ${(remainingMs / 1000).ceil()}s left. '
+          'Pick a shorter clip or trim it in your gallery app first.',
+        );
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+        return;
+      }
+      final remSec = (remainingMs / 1000).ceil();
+      _toast(
+        'Trim which ${remSec}s or less to add (${remSec}s left on this reel).',
+      );
+      if (!mounted) return;
+      _applyBusy(true, message: 'Opening trim…');
+      MinisReelTrimResult? trimOut;
+      try {
+        trimOut = await MinisReelClipTrimmerPage.open(
+          context,
+          File(materialized),
+          maxOutputDuration: Duration(milliseconds: remainingMs),
+        );
+      } finally {
+        if (mounted) {
+          _applyBusy(false);
+        }
+      }
+      if (!mounted) return;
+      if (trimOut == null || trimOut.path.isEmpty) {
+        _logMulticlip('mandatory trim cancelled or empty');
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+        return;
+      }
+      final outMs = trimOut.durationMs;
+      if (outMs <= 0 || _clipsTotalDurationMs + outMs > _sessionCapMs) {
+        _toast('Trimmed segment does not fit the reel.');
+        try {
+          await File(trimOut.path).delete();
+        } catch (_) {}
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+        return;
+      }
+      _applyBusy(true, message: 'Adding clip…');
+      bool appended = false;
+      try {
+        appended = await _appendVideoSegment(
+          trimOut.path,
+          outMs,
+          durationAlreadyFinalized: true,
+        );
+      } finally {
+        if (mounted) {
+          _applyBusy(false);
+        }
+      }
+      if (trimOut.path != materialized) {
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+      }
+      if (!appended) {
+        try {
+          await File(trimOut.path).delete();
+        } catch (_) {}
+      }
+      return;
+    }
+
+    if (!mounted) return;
+    final preview = await openMinisVideoPreview(context, materialized);
+    if (!mounted) {
+      _logMulticlip(
+        'ABORT after preview: not mounted — skipping append (lifecycle): '
+        'dispose/route pop; temp copy may be deleted',
+      );
+      try {
+        await File(materialized).delete();
+      } catch (_) {}
+      return;
+    }
+    if (preview != null && preview.path.isNotEmpty) {
+      _logMulticlip(
+        'preview confirmed path=${p.basename(preview.path)} '
+        'durationMs=${preview.durationMs} '
+        '(may differ if user trimmed in preview)',
+      );
+      if (preview.path != materialized) {
+        _logMulticlip('note: confirmed != materialized (trim export new file)');
+      }
+      _applyBusy(true, message: 'Adding clip…');
+      try {
+        await _appendGalleryVideoAfterPreview(
+          preview.path,
+          previewDurationMs: preview.durationMs,
+        );
+      } finally {
+        if (mounted) {
+          _applyBusy(false);
+        }
+      }
+      if (preview.path != materialized) {
+        try {
+          await File(materialized).delete();
+        } catch (_) {}
+      }
+    } else {
+      _logMulticlip('preview dismissed or empty result (preview=$preview)');
+      try {
+        await File(materialized).delete();
+      } catch (_) {}
+      _toast('Video preview dismissed');
     }
   }
 
@@ -1441,66 +1877,95 @@ class _MinisIndependentCaptureScreenState
 
   Future<void> _openGallery() async {
     _logMulticlipState('_openGallery enter');
+    _logGallery(
+      'open platform=$defaultTargetPlatform videoOnly=${widget.videoOnly} kIsWeb=$kIsWeb',
+    );
     if (_busy || _recording || _countingDown) {
+      _logGallery(
+        'SKIP gate busy=$_busy rec=$_recording countdown=$_countingDown',
+      );
       _logMulticlip(
         '_openGallery SKIP: busy=$_busy recording=$_recording countingDown=$_countingDown',
       );
       return;
     }
     if (kIsWeb) {
+      _logGallery('web — not supported');
       _toast('Gallery is for Android / iOS builds.');
       return;
     }
     try {
+      if (widget.videoOnly) {
+        _logGallery(
+          'videoOnly → FilePicker(video) platform=$defaultTargetPlatform',
+        );
+        await _openGalleryVideoViaFilePicker();
+        return;
+      }
+
+      if (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS ||
+              defaultTargetPlatform == TargetPlatform.macOS)) {
+        _logGallery('mixed story/feed → FilePicker(media) native');
+        final handled = await _openGalleryMixedMediaViaFilePicker();
+        if (handled) return;
+        _logGallery('mixed FilePicker failed — fallback ImagePicker');
+      }
+
       final picker = ImagePicker();
       XFile? x;
+
       try {
+        _logGallery('pickMedia starting');
         x = await picker.pickMedia(imageQuality: 92);
+        _logGallery('pickMedia done null=${x == null}');
       } catch (e1) {
-        // Bug 6 fix: pickMedia is not available on all plugin versions / Android
-        // variants. Fall back first to pickVideo so video flows still work,
-        // then to pickImage as last resort for image-only fallback.
+        // pickMedia is not available on all plugin versions / Android variants.
         _logMulticlip('pickMedia failed ($e1) — trying pickVideo fallback');
-        if (mounted && !widget.videoOnly) {
-          // Only warn user when the image path would also be suppressed.
+        if (mounted) {
           _toast('Media picker limited — falling back to video/image picker.');
         }
         try {
           x = await picker.pickVideo(source: ImageSource.gallery);
         } catch (e2) {
           _logMulticlip('pickVideo fallback also failed ($e2) — trying pickImage');
-          if (!widget.videoOnly) {
-            try {
-              x = await picker.pickImage(
-                source: ImageSource.gallery,
-                imageQuality: 92,
-              );
-            } catch (e3) {
-              _logMulticlip('picker fully failed: $e1 / $e2 / $e3');
-              if (mounted) {
-                _toast(minisUserFriendlyException(e3));
-              }
-              return;
-            }
-          } else {
-            _logMulticlip('picker failed in videoOnly mode: $e1 / $e2');
+          try {
+            x = await picker.pickImage(
+              source: ImageSource.gallery,
+              imageQuality: 92,
+            );
+          } catch (e3) {
+            _logMulticlip('picker fully failed: $e1 / $e2 / $e3');
             if (mounted) {
-              _toast(minisUserFriendlyException(e2));
+              _toast(minisUserFriendlyException(e3));
             }
             return;
           }
         }
       }
       if (x == null) {
+        _logGallery('ImagePicker result null (cancel or empty)');
         _logMulticlip('picker returned null (user cancelled)');
         return;
       }
       if (!mounted) {
+        _logGallery('ABORT after pick not mounted');
         _logMulticlip('ABORT after pick: not mounted');
         return;
       }
-      final path = x.path;
-      final isVideo = _pickedXFileIsVideo(x);
+      _logGallery('picked raw pathLen=${x.path.length} mime=${x.mimeType}');
+      final path = _normalizeLocalPickerPath(x.path);
+      if (path.isEmpty) {
+        _logGallery('normalized path empty');
+        if (mounted) {
+          _toast('Could not read the selected file path.');
+        }
+        return;
+      }
+      final isVideo = _pickedXFileIsVideo(
+        XFile(path, mimeType: x.mimeType, name: x.name),
+      );
       _logMulticlip(
         'picked path=${p.basename(path)} isVideo=$isVideo mime=${x.mimeType}',
       );
@@ -1521,225 +1986,7 @@ class _MinisIndependentCaptureScreenState
         return;
       }
 
-      _applyBusy(true, message: 'Saving video…');
-      String? materialized;
-      try {
-        materialized = await _materializePickedVideoForPreview(path);
-      } catch (e, st) {
-        debugPrint('minis materialize: $e\n$st');
-        if (mounted) {
-          _toast(minisUserFriendlyException(e));
-        }
-        return;
-      } finally {
-        if (mounted) {
-          _applyBusy(false);
-        }
-      }
-      if (!mounted) {
-        _logMulticlip('ABORT after materialize: not mounted');
-        return;
-      }
-      if (materialized == null) {
-        _logMulticlip('REJECT: materialize copy failed (null path)');
-        _toast('Could not read the selected video file.');
-        return;
-      }
-      _logMulticlip('materialized to=${p.basename(materialized)}');
-
-      // Single-clip platforms: preview then hand off (no merge stack).
-      if (!minisMulticlipMergeSupported()) {
-        final preview = await openMinisVideoPreview(context, materialized);
-        if (!mounted) {
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-          return;
-        }
-        if (preview != null && preview.path.isNotEmpty) {
-          _applyBusy(true, message: 'Adding clip…');
-          try {
-            await _appendGalleryVideoAfterPreview(
-              preview.path,
-              previewDurationMs: preview.durationMs,
-            );
-          } finally {
-            if (mounted) {
-              _applyBusy(false);
-            }
-          }
-        } else {
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-          _toast('Video preview dismissed');
-        }
-        return;
-      }
-
-      final remainingMs =
-          _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
-      if (remainingMs < 500) {
-        _toast('No time left on this reel.');
-        try {
-          await File(materialized).delete();
-        } catch (_) {}
-        return;
-      }
-
-      var clipMsProbe = 0;
-      _applyBusy(true, message: 'Reading video…');
-      try {
-        // Gallery files are pre-existing and fully written — use the fast
-        // concurrent probe (100-400 ms) instead of the retry chain (4-8 s).
-        clipMsProbe = await minisFinalizeClipDurationMs(
-          0,
-          materialized,
-          fromGalleryFile: true,
-        );
-      } catch (e, st) {
-        debugPrint('minis gallery probe: $e\n$st');
-        if (mounted) {
-          _toast(minisUserFriendlyException(e, context: 'duration'));
-        }
-        return;
-      } finally {
-        if (mounted) {
-          _applyBusy(false);
-        }
-      }
-
-      _logMulticlip(
-        'gallery probe (pre-preview): clipMs=$clipMsProbe remainingBudgetMs=$remainingMs '
-        'sessionCapMs=$_sessionCapMs usedMs=$_clipsTotalDurationMs',
-      );
-
-      // Longer than what fits: trim first (so multi-clip UX is not "dead" until user guesses length).
-      if (clipMsProbe > 0 && clipMsProbe > remainingMs) {
-        if (!minisReelClipTrimmerPlatformSupported()) {
-          _toast(
-            'This video is longer than the ${(remainingMs / 1000).ceil()}s left. '
-            'Pick a shorter clip or trim it in your gallery app first.',
-          );
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-          return;
-        }
-        final remSec = (remainingMs / 1000).ceil();
-        _toast(
-          'Trim which ${remSec}s or less to add (${remSec}s left on this reel).',
-        );
-        if (!mounted) return;
-        _applyBusy(true, message: 'Opening trim…');
-        MinisReelTrimResult? trimOut;
-        try {
-          trimOut = await MinisReelClipTrimmerPage.open(
-            context,
-            File(materialized),
-            maxOutputDuration: Duration(milliseconds: remainingMs),
-          );
-        } finally {
-          if (mounted) {
-            _applyBusy(false);
-          }
-        }
-        if (!mounted) return;
-        if (trimOut == null || trimOut.path.isEmpty) {
-          _logMulticlip('mandatory trim cancelled or empty');
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-          return;
-        }
-        final outMs = trimOut.durationMs;
-        if (outMs <= 0 || _clipsTotalDurationMs + outMs > _sessionCapMs) {
-          _toast('Trimmed segment does not fit the reel.');
-          try {
-            await File(trimOut.path).delete();
-          } catch (_) {}
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-          return;
-        }
-        _applyBusy(true, message: 'Adding clip…');
-        bool appended = false;
-        try {
-          // Bug 2 fix: the trim span from video_trimmer is the authoritative
-          // length — pass durationAlreadyFinalized so _appendVideoSegment does
-          // not re-probe the brand-new export file (which would report ~1s).
-          appended = await _appendVideoSegment(
-            trimOut.path,
-            outMs,
-            durationAlreadyFinalized: true,
-          );
-        } finally {
-          if (mounted) {
-            _applyBusy(false);
-          }
-        }
-        // Bug 7 fix: delete the original materialized copy when we are done
-        // (trim created a new file; the copy is orphaned either way).
-        if (trimOut.path != materialized) {
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-        }
-        // Also clean up trimOut if the append was rejected.
-        if (!appended) {
-          try {
-            await File(trimOut.path).delete();
-          } catch (_) {}
-        }
-        return;
-      }
-
-      // Fits within remaining budget — optional preview, then append.
-      if (!mounted) return;
-      final preview = await openMinisVideoPreview(context, materialized);
-      if (!mounted) {
-        _logMulticlip(
-          'ABORT after preview: not mounted — skipping append (lifecycle): '
-          'dispose/route pop; temp copy may be deleted',
-        );
-        try {
-          await File(materialized).delete();
-        } catch (_) {}
-        return;
-      }
-      if (preview != null && preview.path.isNotEmpty) {
-        _logMulticlip(
-          'preview confirmed path=${p.basename(preview.path)} '
-          'durationMs=${preview.durationMs} '
-          '(may differ if user trimmed in preview)',
-        );
-        if (preview.path != materialized) {
-          _logMulticlip('note: confirmed != materialized (trim export new file)');
-        }
-        _applyBusy(true, message: 'Adding clip…');
-        try {
-          await _appendGalleryVideoAfterPreview(
-            preview.path,
-            previewDurationMs: preview.durationMs,
-          );
-        } finally {
-          if (mounted) {
-            _applyBusy(false);
-          }
-        }
-        if (preview.path != materialized) {
-          try {
-            await File(materialized).delete();
-          } catch (_) {}
-        }
-      } else {
-        _logMulticlip('preview dismissed or empty result (preview=$preview)');
-        try {
-          await File(materialized).delete();
-        } catch (_) {}
-        _toast('Video preview dismissed');
-      }
+      await _importPickedGalleryVideoFromSourcePath(path);
     } catch (e, st) {
       _logMulticlip('Gallery error: $e\n$st');
       if (mounted) {

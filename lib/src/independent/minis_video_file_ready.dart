@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -24,6 +25,19 @@ Future<bool> waitUntilMinisVideoFileReady(
       } catch (_) {}
     }
     await Future<void>.delayed(interval);
+  }
+  try {
+    final f = File(path);
+    final exists = await f.exists();
+    final len = exists ? await f.length() : -1;
+    debugPrint(
+      'MINIS_MULTICLIP: gallery:ready: waitUntilMinisVideoFileReady FAILED after $maxAttempts tries '
+      'exists=$exists len=$len path=${p.basename(path)}',
+    );
+  } catch (e) {
+    debugPrint(
+      'MINIS_MULTICLIP: gallery:ready: waitUntilMinisVideoFileReady FAILED path=$path err=$e',
+    );
   }
   return false;
 }

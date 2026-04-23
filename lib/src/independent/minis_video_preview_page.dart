@@ -57,10 +57,19 @@ class MinisVideoPreviewPage extends StatefulWidget {
     bool allowReelTrim = false,
     bool confirmOnClose = false,
   }) async {
+    debugPrint(
+      'MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open start pathLen=${videoPath.length} '
+      'tail=${videoPath.length > 96 ? videoPath.substring(videoPath.length - 96) : videoPath}',
+    );
     final ready = await waitUntilMinisVideoFileReady(videoPath);
+    debugPrint(
+      'MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open after wait ready=$ready '
+      'contextMounted=${context.mounted}',
+    );
     if (!ready || !context.mounted) {
       return null;
     }
+    debugPrint('MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open pushing route');
     return Navigator.of(context, rootNavigator: true)
         .push<MinisVideoPreviewResult?>(
       MaterialPageRoute<MinisVideoPreviewResult?>(
