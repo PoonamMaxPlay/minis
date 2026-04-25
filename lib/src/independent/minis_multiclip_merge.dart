@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as dev;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -7,8 +8,10 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:pro_video_editor/pro_video_editor.dart';
 
+import 'package:loopit_minis/src/debug/video_aspect_log.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
+import 'package:video_player/video_player.dart' as vp;
 
 /// Same platforms as [proVideoEditorRenderExportSupported] in hub (no web).
 bool minisMulticlipMergeSupported() {
@@ -23,6 +26,22 @@ bool _mergeCancelSupported() {
   return defaultTargetPlatform == TargetPlatform.android ||
       defaultTargetPlatform == TargetPlatform.iOS ||
       defaultTargetPlatform == TargetPlatform.macOS;
+}
+
+/// Probes merged file with video_player (debug) so logs match feed/reel [VideoAspectDiag].
+void _logMergedVideoFileProbe(String outPath) {
+  unawaited(() async {
+    final c = vp.VideoPlayerController.file(File(outPath));
+    try {
+      await c.initialize();
+      logMinisVideoAspectDiag('minis_merge_output', c.value, pathHint: outPath);
+    } catch (e, st) {
+      dev.log('minis merge file probe failed: $e',
+          name: 'VideoAspectDiag', stackTrace: st);
+    } finally {
+      await c.dispose();
+    }
+  }());
 }
 
 /// Concatenate [clipPaths] with [playbackSpeed] and optional audio; shows progress.
@@ -136,6 +155,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
 
   try {
     await future;
+    _logMergedVideoFileProbe(outPath);
     return outPath;
   } on RenderCanceledException {
     return null;
@@ -143,6 +163,70 @@ Future<String?> mergeMinisVideoClipsWithDialog({
     rethrow;
   }
 }
+/// Silent merge — no dialog. Use this when the caller already shows its own
+/// loading overlay (e.g. LoopIt's runWithMinisHandoffOverlay).
+/// Returns output path on success, or `null` on error.
+Future<String?> mergeMinisVideoClipsSilent({
+  required List<String> clipPaths,
+  required double playbackSpeed,
+  required bool enableAudio,
+  MinisMusicSegment? backgroundMusic,
+}) async {
+  if (clipPaths.isEmpty) return null;
+  if (!minisMulticlipMergeSupported()) return null;
+  for (final path in clipPaths) {
+    if (!File(path).existsSync()) return null;
+  }
+
+  final id = DateTime.now().microsecondsSinceEpoch.toString();
+  final dir = await getTemporaryDirectory();
+  final outPath = p.join(dir.path, 'minis_reel_$id.mp4');
+
+  List<VideoAudioTrack> audioTracks = const [];
+  final seg = backgroundMusic;
+  final music = seg?.path.trim();
+  if (music != null && music.isNotEmpty && File(music).existsSync()) {
+    audioTracks = [
+      VideoAudioTrack(
+        path: music,
+        volume: 1.0,
+        loop: true,
+        audioStartTime: Duration(milliseconds: seg!.startMs),
+        audioEndTime: Duration(milliseconds: seg.endMs),
+      ),
+    ];
+  }
+
+  final duckClipAudio = audioTracks.isNotEmpty;
+  final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+
+  final data = VideoRenderData.withQualityPreset(
+    id: id,
+    videoSegments: clipPaths
+        .map((path) => VideoSegment(
+              video: EditorVideo.file(File(path)),
+              volume: clipVolume,
+            ))
+        .toList(),
+    qualityPreset: VideoQualityPreset.p1080High,
+    outputFormat: VideoOutputFormat.mp4,
+    playbackSpeed: playbackSpeed,
+    enableAudio: enableAudio,
+    audioTracks: audioTracks,
+    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
+  );
+
+  try {
+    await ProVideoEditor.instance.renderVideoToFile(outPath, data);
+    _logMergedVideoFileProbe(outPath);
+    return outPath;
+  } on RenderCanceledException {
+    return null;
+  } catch (_) {
+    rethrow;
+  }
+}
+
 
 class _MinisClipMergeProgressDialog extends StatefulWidget {
   const _MinisClipMergeProgressDialog({

@@ -15,6 +15,7 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
+import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_multiclip_merge.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
@@ -390,7 +391,7 @@ class _MinisIndependentCaptureScreenState
                 const SizedBox(height: 8),
                 Text(
                   mergeSupported
-                      ? 'You already have video clips on this reel. Merge the reel, remove the last clip, or keep recording video.'
+                      ? 'You already have video clips in this mini. Merge your minis, remove the last clip, or keep recording video.'
                       : 'You already have video clips. Remove the last clip or keep recording video.',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.78),
@@ -405,7 +406,7 @@ class _MinisIndependentCaptureScreenState
                       Navigator.pop(ctx);
                       unawaited(_confirmClip());
                     },
-                    child: const Text('Merge reel'),
+                    child: const Text('Merge minis'),
                   ),
                   const SizedBox(height: 10),
                 ],
@@ -709,7 +710,7 @@ class _MinisIndependentCaptureScreenState
     final capMs = _sessionCapMs;
     final cap = minisFormatClipDurationLabel(capMs);
     if (_videoClips.isEmpty && !_recording) {
-      return 'Reel max $cap';
+      return 'Minis max $cap';
     }
     final usedMs =
         _clipsTotalDurationMs + (_recording ? _liveClipElapsedMs : 0);
@@ -1240,7 +1241,7 @@ class _MinisIndependentCaptureScreenState
     final remainingMs =
         _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
     if (remainingMs < 500) {
-      _toast('No time left on this reel.');
+      _toast('No time left in this mini.');
       try {
         await File(materialized).delete();
       } catch (_) {}
@@ -1285,7 +1286,7 @@ class _MinisIndependentCaptureScreenState
       }
       final remSec = (remainingMs / 1000).ceil();
       _toast(
-        'Trim which ${remSec}s or less to add (${remSec}s left on this reel).',
+        'Trim which ${remSec}s or less to add (${remSec}s left in this mini).',
       );
       if (!mounted) return;
       _applyBusy(true, message: 'Opening trim…');
@@ -1311,7 +1312,7 @@ class _MinisIndependentCaptureScreenState
       }
       final outMs = trimOut.durationMs;
       if (outMs <= 0 || _clipsTotalDurationMs + outMs > _sessionCapMs) {
-        _toast('Trimmed segment does not fit the reel.');
+        _toast('Trimmed segment does not fit this mini.');
         try {
           await File(trimOut.path).delete();
         } catch (_) {}
@@ -1492,34 +1493,52 @@ class _MinisIndependentCaptureScreenState
     }
 
     if (_clipsTotalDurationMs + useMs > _sessionCapMs) {
-      _toast('That clip no longer fits the reel time.');
+      _toast("That clip no longer fits this mini's time limit.");
       return false;
     }
-    Uint8List? thumb;
-    try {
-      thumb = await _thumbnailForVideoPath(filePath, useMs);
-    } catch (e, st) {
-      debugPrint('minis thumbnail: $e\n$st');
-    }
-    if (!mounted) {
-      _logMulticlip('_appendVideoSegment ABORT: not mounted after thumbnail');
-      return false;
-    }
+    final clipId = _nextClipId++;
+    
     setState(() {
       _videoClips.add(
         MinisRecordingClip(
-          id: _nextClipId++,
+          id: clipId,
           path: filePath,
           durationMs: useMs,
-          thumbnailBytes: thumb,
+          thumbnailBytes: null,
           speedAtRecord: _speedSteps[_speedIndex],
         ),
       );
       _clipsTotalDurationMs += useMs;
       _lastCapturePath = null;
     });
+    
     _logMulticlipState('clip appended (total clips=${_videoClips.length})');
     _toast('Clip ${_videoClips.length} added (${minisFormatClipDurationLabel(useMs)})');
+    
+    // Fetch thumbnail asynchronously with a delay so we don't freeze the active camera!
+    Future.delayed(const Duration(milliseconds: 1200), () async {
+      Uint8List? thumb;
+      try {
+        thumb = await _thumbnailForVideoPath(filePath, useMs);
+      } catch (e, st) {
+        debugPrint('minis thumbnail: $e\n$st');
+      }
+      if (mounted && thumb != null) {
+        setState(() {
+          final idx = _videoClips.indexWhere((c) => c.id == clipId);
+          if (idx >= 0) {
+            _videoClips[idx] = MinisRecordingClip(
+              id: clipId,
+              path: filePath,
+              durationMs: useMs,
+              thumbnailBytes: thumb,
+              speedAtRecord: _speedSteps[_speedIndex],
+            );
+          }
+        });
+      }
+    });
+    
     return true;
   }
 
@@ -1567,7 +1586,7 @@ class _MinisIndependentCaptureScreenState
           await minisFinalizeClipDurationMs(result.durationMs, result.path);
       final delta = newMs - clip.durationMs;
       if (_clipsTotalDurationMs + delta > _sessionCapMs) {
-        _toast('Trimmed clip no longer fits the reel time cap.');
+        _toast("Trimmed clip no longer fits this mini's time cap.");
         try {
           await File(result.path).delete();
         } catch (_) {}
@@ -1678,7 +1697,7 @@ class _MinisIndependentCaptureScreenState
         _logMulticlip(
           'REJECT: over cap after preview (sum=$sum cap=$cap) — should be rare',
         );
-        _toast('That clip no longer fits the reel time. Try again.');
+        _toast('That clip no longer fits the time limit for this mini. Try again.');
         return;
       }
       _logMulticlip('calling _appendVideoSegment');
@@ -2016,85 +2035,60 @@ class _MinisIndependentCaptureScreenState
     );
     if (_videoClips.isNotEmpty) {
       if (_busy || _recording || _countingDown) return;
-      if (!minisMulticlipMergeSupported()) {
-        _toast('Merging clips requires Android, iOS, or macOS.');
+
+      // STRICT PREVIEW: ALL CLIPS PASSTHROUGH (INSTANT)
+      final rawPaths = _videoClips.map((c) => c.path).toList();
+      final preview = await MinisVideoPreviewPage.open(
+        context,
+        rawPaths,
+        title: 'Preview',
+        confirmLabel: 'Use minis',
+        allowReelTrim: minisReelClipTrimmerPlatformSupported() && rawPaths.length == 1,
+        confirmOnClose: true,
+      );
+      if (!mounted) return;
+      if (preview == null || preview.path.isEmpty) {
+        return; // user cancelled preview
+      }
+      
+      final postPreviewPath = preview.path;
+      
+      // NOW apply processing ONLY AFTER the user confirmed the preview.
+      final hasMultipleClips = _videoClips.length > 1;
+      final hasSpeedOrMusic = _speedSteps[_speedIndex] != 1.0 || _musicSegment != null;
+      
+      if (hasMultipleClips || hasSpeedOrMusic) {
+        if (!minisMulticlipMergeSupported()) {
+          _toast('Merging/Mixing requires Android, iOS, or macOS.');
+          return;
+        }
+        
+        // Pass the merge task back to the host app!
+        // _deliverConfirmedCapture only accepts String, so we call the host
+        // directly here — Object? is fine for completeCaptureResult.
+        final pathsToMerge = hasMultipleClips ? rawPaths : [postPreviewPath];
+        _videoClips.clear();
+        _clipsTotalDurationMs = 0;
+        
+        final mergeRequest = <String, Object?>{
+          'minis_action': 'merge_required',
+          'clipPaths': pathsToMerge,
+          'playbackSpeed': _speedSteps[_speedIndex],
+          'enableAudio': _micEnabled,
+          'backgroundMusic': _musicSegment,
+        };
+        MinisCaptureHost.completeCaptureResult(mergeRequest);
+        if (!mounted) return;
+        final nav = Navigator.maybeOf(context, rootNavigator: true);
+        if (nav != null && nav.canPop()) nav.pop();
+        return;
+      } else {
+        // No processing needed. Deliver raw!
+        _videoClips.clear();
+        _clipsTotalDurationMs = 0;
+        _deliverConfirmedCapture(postPreviewPath);
         return;
       }
-      _applyBusy(true, message: 'Merging reels…');
-      try {
-        final paths = _videoClips.map((c) => c.path).toList();
-        final merged = await mergeMinisVideoClipsWithDialog(
-          context: context,
-          clipPaths: paths,
-          playbackSpeed: _speedSteps[_speedIndex],
-          enableAudio: _micEnabled,
-          backgroundMusic: _musicSegment,
-        );
-        if (!mounted) return;
-        if (merged == null || merged.isEmpty) {
-          _toast('Merge cancelled or failed.');
-          return;
-        }
-        if (mounted) {
-          _applyBusy(true, message: 'Preparing merged video…');
-        }
-        final ready = await waitUntilMinisVideoFileReady(merged);
-        if (!mounted) return;
-        if (!ready) {
-          _toast('Merged video not found or still writing. Try again.');
-          try {
-            await File(merged).delete();
-          } catch (_) {}
-          return;
-        }
-        if (!mounted) return;
-        if (mounted) {
-          _applyBusy(false);
-        }
-        final mergedPreview = await MinisVideoPreviewPage.open(
-          context,
-          merged,
-          title: 'Merged reel',
-          confirmLabel: 'Use reel',
-          allowReelTrim: minisReelClipTrimmerPlatformSupported(),
-          confirmOnClose: true,
-        );
-        if (!mounted) return;
-        if (mergedPreview == null || mergedPreview.path.isEmpty) {
-          try {
-            await File(merged).delete();
-          } catch (_) {}
-          _toast('Reel preview dismissed');
-          return;
-        }
-        for (final c in _videoClips) {
-          try {
-            final f = File(c.path);
-            if (await f.exists()) await f.delete();
-          } catch (_) {}
-        }
-        if (!mounted) return;
-        if (mergedPreview.path != merged) {
-          try {
-            await File(merged).delete();
-          } catch (_) {}
-        }
-        setState(() {
-          _videoClips.clear();
-          _clipsTotalDurationMs = 0;
-        });
-        if (!mounted) return;
-        _deliverConfirmedCapture(mergedPreview.path);
-      } catch (e) {
-        if (mounted) {
-          _toast('Could not merge reels. ${minisUserFriendlyException(e)}');
-        }
-      } finally {
-        if (mounted) {
-          _applyBusy(false);
-        }
-      }
-      return;
     }
 
     final path = _lastCapturePath;
@@ -2133,10 +2127,24 @@ class _MinisIndependentCaptureScreenState
               } catch (_) {}
               return;
             }
+            if (!mounted) return;
+            if (mounted) {
+              _applyBusy(true, message: 'Encoding for device playback…');
+            }
+            var outForDelivery = merged;
+            final mixedNormalized =
+                await minisTranscodeToH264ForDevicePlayback(merged);
+            if (!mounted) return;
+            if (mixedNormalized != null) {
+              outForDelivery = mixedNormalized;
+              try {
+                await File(merged).delete();
+              } catch (_) {}
+            }
             if (mounted) {
               _applyBusy(false);
             }
-            _deliverConfirmedCapture(merged);
+            _deliverConfirmedCapture(outForDelivery);
           } catch (e) {
             if (mounted) {
               _toast('Mix failed. ${minisUserFriendlyException(e)}');
@@ -2264,7 +2272,7 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
     if (_clipsTotalDurationMs >= _sessionCapMs) {
-      _toast('Reel time limit reached. Tap check to merge or remove a clip.');
+      _toast('Minis time limit reached. Tap check to merge or remove a clip.');
       return;
     }
     final budgetMs = _sessionCapMs - _clipsTotalDurationMs;
@@ -2289,7 +2297,7 @@ class _MinisIndependentCaptureScreenState
           unawaited(
             _stopRecordingInternal(
               userMessage:
-                  'Max reel time reached for this segment ($_speedRailLabel)',
+                  'Max minis time reached for this segment ($_speedRailLabel)',
             ),
           );
         }
@@ -2320,7 +2328,9 @@ class _MinisIndependentCaptureScreenState
       _zoomGesturePointer = null;
       if (path != null && path.isNotEmpty) {
         final d = math.max(1, rawElapsed);
-        await _appendVideoSegment(path, d);
+        // Avoid probing duration on fresh camera clips — VideoPlayer init
+        // freezes the active camera preview on many Android devices!
+        await _appendVideoSegment(path, d, durationAlreadyFinalized: true);
       } else {
         _toast('No video file from camera.');
       }
@@ -2430,7 +2440,7 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
     if (_clipsTotalDurationMs >= _sessionCapMs) {
-      _toast('Reel time limit reached.');
+      _toast('Minis time limit reached.');
       return;
     }
     // Bug 8 fix: cancel any in-progress zoom gesture when the shutter goes
@@ -3322,7 +3332,7 @@ class _MinisIndependentCaptureScreenState
                                 Padding(
                                   padding: const EdgeInsets.only(bottom: 6),
                                   child: Text(
-                                    'Merge reel',
+                                    'Merge minis',
                                     textAlign: TextAlign.center,
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,

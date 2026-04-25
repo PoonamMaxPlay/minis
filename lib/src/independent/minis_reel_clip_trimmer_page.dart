@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/native_video_trim_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
@@ -73,6 +74,14 @@ class MinisReelClipTrimmerPage extends StatefulWidget {
 class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
   final Trimmer _trimmer = Trimmer();
 
+  /// Current file (may be re-encoded to H.264 if the source could not open).
+  late File _activeVideoFile;
+
+  /// Re-encode output path, deleted on success handoff, cancel, or retry from original.
+  String? _repairTempPath;
+  bool _h264RepairTried = false;
+  bool _reencodingForDevice = false;
+
   double _startMs = 0;
   double _endMs = 0;
   /// Passed to [TrimViewer.maxVideoLength] (min of cap, source duration).
@@ -86,38 +95,78 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
   @override
   void initState() {
     super.initState();
+    _activeVideoFile = widget.videoFile;
     // Match package example: start [Trimmer.loadVideo] without awaiting in a way
     // that blocks the first frame, so [TrimViewer] mounts and subscribes to
     // [TrimmerEvent.initialized] before the async initialize() completes.
     unawaited(_loadVideo());
   }
 
+  /// One re-encode pass (H.264 ~720p) so [Trimmer] / Exo can open the clip.
+  Future<void> _failLoadOrReencode() async {
+    if (!_h264RepairTried) {
+      _h264RepairTried = true;
+      if (mounted) {
+        setState(() => _reencodingForDevice = true);
+      }
+      final out =
+          await minisTranscodeToH264ForDevicePlayback(_activeVideoFile.path);
+      if (mounted) {
+        setState(() => _reencodingForDevice = false);
+      }
+      if (out != null && mounted) {
+        if (_repairTempPath != null && _repairTempPath != out) {
+          try {
+            await File(_repairTempPath!).delete();
+          } catch (_) {}
+        }
+        _repairTempPath = out;
+        _activeVideoFile = File(out);
+        await _loadVideo();
+        return;
+      }
+    }
+    if (_repairTempPath != null) {
+      try {
+        await File(_repairTempPath!).delete();
+      } catch (_) {}
+      _repairTempPath = null;
+    }
+    _activeVideoFile = widget.videoFile;
+    if (mounted) {
+      setState(() {
+        _loadFailed = true;
+        _reencodingForDevice = false;
+      });
+    }
+  }
+
   Future<void> _loadVideo() async {
     try {
-      await _trimmer.loadVideo(videoFile: widget.videoFile);
+      await _trimmer.loadVideo(videoFile: _activeVideoFile);
       if (!mounted) {
         return;
       }
       final ctrl = _trimmer.videoPlayerController;
       if (ctrl == null) {
-        setState(() => _loadFailed = true);
+        await _failLoadOrReencode();
         return;
       }
       await minisWaitForVideoControllerDuration(ctrl);
       if (!mounted) return;
       var total = ctrl.value.duration.inMilliseconds;
       if (total <= 0) {
-        setState(() => _loadFailed = true);
+        await _failLoadOrReencode();
         return;
       }
       // Same ~1s placeholder issue as multi-clip duration: reload once after
       // a beat so [Trimmer]'s player re-reads container length on large MP4s.
       try {
-        final len = await widget.videoFile.length();
+        final len = await _activeVideoFile.length();
         if (len >= 400 * 1024 && total < 2200) {
           await Future<void>.delayed(const Duration(milliseconds: 1600));
           if (!mounted) return;
-          await _trimmer.loadVideo(videoFile: widget.videoFile);
+          await _trimmer.loadVideo(videoFile: _activeVideoFile);
           if (!mounted) return;
           final ctrl2 = _trimmer.videoPlayerController;
           if (ctrl2 != null) {
@@ -131,7 +180,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         }
       } catch (_) {}
       if (total <= 0) {
-        setState(() => _loadFailed = true);
+        await _failLoadOrReencode();
         return;
       }
       final capReq = widget.maxOutputDuration?.inMilliseconds ?? 30000;
@@ -148,18 +197,22 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         stackTrace: st,
         context: 'MinisReelClipTrimmerPage._loadVideo',
         extra: {
-          'sourceFile': p.basename(widget.videoFile.path),
+          'sourceFile': p.basename(_activeVideoFile.path),
           'phase': 'loadVideo',
         },
       );
-      if (mounted) {
-        setState(() => _loadFailed = true);
-      }
+      await _failLoadOrReencode();
     }
   }
 
   @override
   void dispose() {
+    if (_repairTempPath != null) {
+      try {
+        File(_repairTempPath!).deleteSync();
+      } catch (_) {}
+      _repairTempPath = null;
+    }
     // Do not call [VideoPlayerController.dispose] here: [video_trimmer]'s
     // [FixedTrimViewer]/[ScrollableTrimViewer] already dispose the shared
     // [Trimmer.videoPlayerController] on pop; double-dispose causes
@@ -199,7 +252,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
           logVideoTrimMissingOutputDiagnostic(
             context: 'MinisReelClipTrimmerPage.saveTrimmedVideo',
             extra: {
-              'sourceFile': p.basename(widget.videoFile.path),
+              'sourceFile': p.basename(_activeVideoFile.path),
               'startMs': _startMs,
               'endMs': _endMs,
               'spanMs': _endMs - _startMs,
@@ -216,7 +269,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         stackTrace: st,
         context: 'MinisReelClipTrimmerPage._save',
         extra: {
-          'sourceFile': p.basename(widget.videoFile.path),
+          'sourceFile': p.basename(_activeVideoFile.path),
           'startMs': _startMs,
           'endMs': _endMs,
         },
@@ -267,7 +320,18 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                 const SizedBox(height: 24),
                 OutlinedButton.icon(
                   onPressed: () {
-                    setState(() => _loadFailed = false);
+                    if (_repairTempPath != null) {
+                      try {
+                        File(_repairTempPath!).deleteSync();
+                      } catch (_) {}
+                      _repairTempPath = null;
+                    }
+                    _activeVideoFile = widget.videoFile;
+                    _h264RepairTried = false;
+                    setState(() {
+                      _loadFailed = false;
+                      _videoLoaded = false;
+                    });
                     unawaited(_loadVideo());
                   },
                   style: OutlinedButton.styleFrom(
@@ -302,7 +366,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(
-          capSec != null ? 'Trim (up to ${capSec}s for this reel)' : 'Trim clip',
+          capSec != null ? 'Trim (up to ${capSec}s for this mini)' : 'Trim clip',
         ),
         actions: [
           TextButton(
@@ -409,6 +473,33 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
               color: Color(0x88000000),
               child: Center(
                 child: CircularProgressIndicator(color: Colors.white),
+              ),
+            ),
+          if (_reencodingForDevice)
+            const Positioned.fill(
+              child: ColoredBox(
+                color: Color(0xCC000000),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(color: Colors.white),
+                      SizedBox(height: 12),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 32),
+                        child: Text(
+                          'Preparing a compatible copy…',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white70,
+                            height: 1.4,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
         ],

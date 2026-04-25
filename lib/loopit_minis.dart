@@ -10,6 +10,7 @@ export 'package:loopit_minis/src/independent/minis_music_segment.dart';
 export 'package:loopit_minis/src/independent/minis_music_trim_sheet.dart';
 export 'package:loopit_minis/src/independent/minis_recording_clip.dart';
 export 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
+export 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 export 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 export 'package:loopit_minis/src/independent/minis_video_duration.dart';
 export 'package:loopit_minis/src/independent/minis_video_preview_page.dart';

@@ -62,7 +62,7 @@ class MinisCapturePlaceholder extends StatelessWidget {
                     const SizedBox(height: 16),
                     Text(
                       'This app is the lightweight Minis package sample.\n\n'
-                      'For the full reels camera (preview, record, tools), run '
+                      'For the full Minis camera (preview, record, tools), run '
                       'LoopIt with the standalone entry:\n'
                       'flutter run -t lib/minis_standalone_main.dart\n\n'
                       'Inside LoopIt, the sheet opens that screen via '

@@ -350,7 +350,7 @@ class _VideoClipInsightPageState extends State<VideoClipInsightPage> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Skim the clip - same idea as reels apps before you edit.',
+                'Skim the clip — same preview step as Minis before you edit.',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 12),
@@ -1347,7 +1347,7 @@ class _MinisVideoHubPageState extends State<MinisVideoHubPage> {
                                 const SizedBox(height: 4),
                                 Text(
                                   'See length, size, sound, and a filmstrip - '
-                                  'like reels apps before you edit.',
+                                  'like Minis before you edit.',
                                   style: Theme.of(context)
                                       .textTheme
                                       .bodySmall

@@ -103,7 +103,7 @@ Future<MinisVideoPreviewResult?> openMinisVideoPreview(
 }) {
   return MinisVideoPreviewPage.open(
     context,
-    videoPath,
+    [videoPath],
     allowReelTrim: allowReelTrim,
   );
 }
