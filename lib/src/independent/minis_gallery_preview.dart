@@ -100,10 +100,12 @@ Future<MinisVideoPreviewResult?> openMinisVideoPreview(
   BuildContext context,
   String videoPath, {
   bool allowReelTrim = false,
+  int? initialTotalDurationMs,
 }) {
   return MinisVideoPreviewPage.open(
     context,
     [videoPath],
     allowReelTrim: allowReelTrim,
+    initialTotalDurationMs: initialTotalDurationMs,
   );
 }

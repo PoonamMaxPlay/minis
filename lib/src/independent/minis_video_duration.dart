@@ -12,8 +12,9 @@ Future<int> minisResolveVideoDurationMsMetadataOnly(String filePath) async {
   final file = File(filePath);
   if (!await file.exists()) return 0;
   try {
-    final meta =
-        await ProVideoEditor.instance.getMetadata(EditorVideo.file(file));
+    final meta = await ProVideoEditor.instance
+        .getMetadata(EditorVideo.file(file))
+        .timeout(const Duration(seconds: 3));
     return meta.duration.inMilliseconds.clamp(0, 1 << 30);
   } catch (_) {
     return 0;
@@ -33,10 +34,14 @@ Future<int> minisResolveVideoDurationMs(String filePath) async {
   // already knows duration (common for gallery MP4s; helps multi-clip sessions).
   int metaMs = 0;
   try {
-    final meta =
-        await ProVideoEditor.instance.getMetadata(EditorVideo.file(file));
+    final meta = await ProVideoEditor.instance
+        .getMetadata(EditorVideo.file(file))
+        .timeout(const Duration(seconds: 2));
     metaMs = meta.duration.inMilliseconds.clamp(0, 1 << 30);
   } catch (_) {}
+
+  // If metadata is already valid and "long", we can skip the expensive player probe.
+  if (metaMs > 2000) return metaMs;
 
   final fromPlayer = await _durationMsViaVideoPlayer(file);
   return math.max(fromPlayer, metaMs);
@@ -164,35 +169,38 @@ Future<int> _resolveGalleryFileDurationMs(
 
   final startTime = DateTime.now();
 
-  final metaFuture = _probeViaMeta(file);
-  final playerFuture = _durationMsViaVideoPlayer(file);
-  final compressFuture = _probeViaVideoCompress(filePath);
+  final metaFuture =
+      _probeViaMeta(file).timeout(const Duration(seconds: 3), onTimeout: () => 0);
+  final playerFuture = _durationMsViaVideoPlayer(file)
+      .timeout(const Duration(seconds: 6), onTimeout: () => 0);
+  final compressFuture = _probeViaVideoCompress(filePath)
+      .timeout(const Duration(seconds: 4), onTimeout: () => 0);
 
   int best = 0;
   try {
     debugPrint('Racing all 3 probers (early exit on first valid)...');
-    
+
     final completer = Completer<int>();
     int completedCount = 0;
-    
+
     void checkDone(int val) {
       if (val > best) best = val;
       completedCount++;
       if (!completer.isCompleted) {
         if (val > 1000) {
-           completer.complete(val);
+          completer.complete(val);
         } else if (completedCount == 3) {
-           completer.complete(best);
+          completer.complete(best);
         }
       }
     }
-    
+
     metaFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
     playerFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
     compressFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
-    
+
     best = await completer.future.timeout(
-      const Duration(seconds: 12),
+      const Duration(seconds: 5),
       onTimeout: () {
         debugPrint('ERROR: Race timed out, using best=$best');
         return best;
@@ -237,8 +245,9 @@ Future<int> _resolveGalleryFileDurationMs(
 Future<int> _probeViaMeta(File file) async {
   try {
     debugPrint('[_probeViaMeta] Starting ProVideoEditor metadata read...');
-    final meta =
-        await ProVideoEditor.instance.getMetadata(EditorVideo.file(file));
+    final meta = await ProVideoEditor.instance
+        .getMetadata(EditorVideo.file(file))
+        .timeout(const Duration(seconds: 3));
     debugPrint('[_probeViaMeta] Success! duration=${meta.duration.inMilliseconds}ms');
     return meta.duration.inMilliseconds.clamp(0, 1 << 30);
   } catch (e, st) {
@@ -250,7 +259,7 @@ Future<int> _probeViaMeta(File file) async {
 Future<int> _probeViaVideoCompress(String filePath) async {
   try {
     debugPrint('[_probeViaVideoCompress] Starting VideoCompress metadata read...');
-    final info = await VideoCompress.getMediaInfo(filePath);
+    final info = await VideoCompress.getMediaInfo(filePath).timeout(const Duration(seconds: 4));
     final durationMs = info.duration?.toInt() ?? 0;
     debugPrint('[_probeViaVideoCompress] Success! duration=${durationMs}ms');
     return durationMs;

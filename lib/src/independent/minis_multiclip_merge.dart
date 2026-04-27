@@ -10,6 +10,8 @@ import 'package:pro_video_editor/pro_video_editor.dart';
 
 import 'package:loopit_minis/src/debug/video_aspect_log.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
+import 'package:loopit_minis/src/minis_capture_host.dart';
+import 'package:loopit_minis/src/minis_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:video_player/video_player.dart' as vp;
 
@@ -216,13 +218,26 @@ Future<String?> mergeMinisVideoClipsSilent({
     transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
   );
 
+  StreamSubscription? progressSub;
+  if (MinisCaptureHost.hasHandoffOverlay) {
+    progressSub = ProVideoEditor.instance.progressStreamById(id).listen((snap) {
+      MinisCaptureHost.updateHandoffProgress(snap.progress);
+    });
+  }
+
   try {
     await ProVideoEditor.instance.renderVideoToFile(outPath, data);
+    await progressSub?.cancel();
     _logMergedVideoFileProbe(outPath);
     return outPath;
   } on RenderCanceledException {
+    await progressSub?.cancel();
     return null;
-  } catch (_) {
+  } catch (e) {
+    await progressSub?.cancel();
+    if (MinisCaptureHost.hasHandoffOverlay) {
+      MinisCaptureHost.reportHandoffError(minisUserFriendlyException(e));
+    }
     rethrow;
   }
 }
@@ -284,12 +299,16 @@ class _MinisClipMergeProgressDialogState
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Merging clips'),
+      backgroundColor: const Color(0xFF1C1C1E),
+      title: const Text(
+        'Merging clips',
+        style: TextStyle(color: Colors.white),
+      ),
       content: StreamBuilder<ProgressModel>(
         stream: ProVideoEditor.instance.progressStreamById(widget.taskId),
         builder: (context, snap) {
           double? nativeProgress = snap.data?.progress;
-          
+
           if (nativeProgress != null && nativeProgress > 0.01) {
             // Native stream is working correctly, stop simulation.
             _simTimer?.cancel();
@@ -301,9 +320,35 @@ class _MinisClipMergeProgressDialogState
           return Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              LinearProgressIndicator(value: nativeProgress),
               const SizedBox(height: 12),
-              Text('${(nativeProgress * 100).toStringAsFixed(0)}%'),
+              SizedBox(
+                width: 84,
+                height: 84,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    CircularProgressIndicator(
+                      value: nativeProgress,
+                      strokeWidth: 4,
+                      color: Colors.white,
+                      backgroundColor: Colors.white24,
+                    ),
+                    Text(
+                      '${(nativeProgress * 100).toInt()}%',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Combining segments…',
+                style: TextStyle(color: Colors.white70, fontSize: 15),
+              ),
             ],
           );
         },
@@ -315,7 +360,10 @@ class _MinisClipMergeProgressDialogState
               _simTimer?.cancel();
               widget.onCancel();
             },
-            child: const Text('Cancel'),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: Colors.white54),
+            ),
           ),
       ],
     );
