@@ -2283,7 +2283,7 @@ class _MinisIndependentCaptureScreenState
       _activeClipStartedAt = DateTime.now();
       _clipBudgetMsAtRecordStart = budgetMs;
       setState(() => _recording = true);
-      unawaited(_syncZoomRangeFromEngine());
+      // unawaited(_syncZoomRangeFromEngine()); // Removed to prevent freeze on recording start
       unawaited(_startGuideMusicForRecording());
       unawaited(_ensureGuideMusicPlayingAfterRecordStart());
       _clipElapsedTicker?.cancel();
@@ -2322,9 +2322,10 @@ class _MinisIndependentCaptureScreenState
         started != null ? DateTime.now().difference(started).inMilliseconds : 0;
     rawElapsed = math.min(rawElapsed, _clipBudgetMsAtRecordStart);
     try {
+      setState(() => _recording = false);
+      _applyBusy(true, message: 'Saving…');
       final path = await eng.stopRecording();
       if (!mounted) return;
-      setState(() => _recording = false);
       _zoomGesturePointer = null;
       if (path != null && path.isNotEmpty) {
         final d = math.max(1, rawElapsed);
@@ -2343,6 +2344,10 @@ class _MinisIndependentCaptureScreenState
         _zoomGesturePointer = null;
       }
       _toast('Stop failed. ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) {
+        _applyBusy(false);
+      }
     }
   }
 
