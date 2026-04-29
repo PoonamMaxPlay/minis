@@ -14,6 +14,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
+import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
+import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
 import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
@@ -74,6 +76,8 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
     this.initialMusicStartMs = 0,
     this.initialMusicEndMs,
     this.videoOnly = false,
+    this.cameraPerformanceMode = MinisCameraPerformanceMode.auto,
+    this.useNativeAndroidCamera = false,
   });
 
   /// If null, a [CameraPluginMinisEngine] is created and disposed by this
@@ -107,6 +111,15 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
   /// photo capture and still-image picks from the gallery; only video is
   /// allowed. Story and feed flows pass `false` so photo + video both work.
   final bool videoOnly;
+
+  /// Selects preview/capture resolution for the default [CameraPluginMinisEngine].
+  /// Ignored when [engine] is provided. Defaults to device heuristics ([auto]).
+  final MinisCameraPerformanceMode cameraPerformanceMode;
+
+  /// Android: use CameraX embedded in a Platform View instead of the Flutter
+  /// `camera` plugin ([NativeAndroidMinisCameraEngine]). Default off; enable with
+  /// host flag / `--dart-define=USE_NATIVE_MINIS_CAMERA=true`.
+  final bool useNativeAndroidCamera;
 
   @override
   State<MinisIndependentCaptureScreen> createState() =>
@@ -247,10 +260,9 @@ class _MinisIndependentCaptureScreenState
     if (widget.engine != null) {
       _engine = widget.engine;
     } else {
-      _engine = CameraPluginMinisEngine();
       _ownEngine = true;
     }
-    _boot();
+    unawaited(_boot());
   }
 
   Future<void> _boot() async {
@@ -272,7 +284,14 @@ class _MinisIndependentCaptureScreenState
     }
 
     try {
-      await _engine!.initialize();
+      if (widget.engine == null && _ownEngine && _engine == null) {
+        _engine = await createMinisEngineAfterPermission(
+          performanceMode: widget.cameraPerformanceMode,
+          useNativeAndroidCamera: widget.useNativeAndroidCamera,
+        );
+      } else {
+        await _engine!.initialize();
+      }
       if (mounted) {
         setState(() {
           _busy = false;
@@ -456,13 +475,8 @@ class _MinisIndependentCaptureScreenState
 
   @override
   void dispose() {
-    // Reset orientations when leaving capture screen
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    // Stay portrait-up when leaving capture (host app is portrait-only).
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
     _maxRecordTimer?.cancel();
     _holdStartTimer?.cancel();

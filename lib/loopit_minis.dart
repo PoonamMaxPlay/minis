@@ -3,6 +3,8 @@ library;
 
 export 'package:loopit_minis/src/hub_page.dart';
 export 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
+export 'package:loopit_minis/src/independent/minis_camera_performance.dart';
+export 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
 export 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
 export 'package:loopit_minis/src/independent/minis_capture_screen.dart';
 export 'package:loopit_minis/src/independent/minis_multiclip_merge.dart';

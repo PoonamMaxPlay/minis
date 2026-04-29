@@ -112,8 +112,18 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   int get _currentDurMs => _isMultiClip
       ? (_nativeController?.duration.inMilliseconds ?? 0)
       : (_controller?.value.duration.inMilliseconds ?? 0);
-  int get _totalDurMs =>
-      _currentDurMs > 0 ? _currentDurMs : (_probedDurationMs ?? 0);
+  int get _totalDurMs {
+    final native = _currentDurMs;
+    final probed = _probedDurationMs;
+    if (_isMultiClip) {
+      final n = native > 0 ? native : 0;
+      final p = (probed != null && probed > 0) ? probed : 0;
+      final m = math.max(n, p);
+      if (m > 0) return m;
+      return n > 0 ? n : (probed ?? 0);
+    }
+    return native > 0 ? native : (probed ?? 0);
+  }
   double get _ar {
     double ratio = 1.0;
     if (_isMultiClip) {
@@ -149,10 +159,22 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     _currentIndex = 0;
     _path = _paths[_currentIndex];
 
-    // Asynchronously probe duration in case VideoPlayer fails to read it.
-    minisFinalizeClipDurationMs(1, _path, fromGalleryFile: true).then((ms) {
-      if (mounted) setState(() => _probedDurationMs = ms);
-    });
+    // Asynchronously probe duration in case the player under-reports (multi-clip
+    // on Android often exposes only the first window until the timeline is ready).
+    if (_paths.length > 1) {
+      unawaited(Future(() async {
+        var sum = 0;
+        for (final p in _paths) {
+          sum += await minisResolveVideoDurationMsMetadataOnly(p);
+        }
+        if (!mounted) return;
+        if (sum > 0) setState(() => _probedDurationMs = sum);
+      }));
+    } else {
+      minisFinalizeClipDurationMs(1, _path, fromGalleryFile: true).then((ms) {
+        if (mounted) setState(() => _probedDurationMs = ms);
+      });
+    }
 
     if (_isMultiClip) {
       _nativeController = MinisPreviewPlayerController(_paths);

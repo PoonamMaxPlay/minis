@@ -1,21 +1,53 @@
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
 
 /// [MinisCameraEnginePort] backed by the official Flutter **`camera`** plugin
 /// (no Retrytech). Suitable for Android / iOS; not for web.
 class CameraPluginMinisEngine implements MinisCameraEnginePort {
+  CameraPluginMinisEngine({
+    this.performanceMode = MinisCameraPerformanceMode.auto,
+    this.resolutionPresetOverride,
+  });
+
+  /// When set, forces this preset and skips [performanceMode] / auto inference.
+  /// Intended for tests or host-provided tuning.
+  final ResolutionPreset? resolutionPresetOverride;
+
+  /// Auto (device heuristics) or a fixed quality band.
+  final MinisCameraPerformanceMode performanceMode;
+
   CameraController? _controller;
   List<CameraDescription> _cameras = const [];
   bool _torchOn = false;
   bool _audioEnabled = true;
+
+  /// First successful primary preset for this session (after auto-resolve).
+  ResolutionPreset? _sessionPrimaryPreset;
 
   @override
   bool get isInitialized => _controller?.value.isInitialized ?? false;
 
   @override
   bool get isTorchOn => _torchOn;
+
+  Future<ResolutionPreset> _resolvePrimaryPreset() async {
+    if (resolutionPresetOverride != null) {
+      return resolutionPresetOverride!;
+    }
+    if (performanceMode == MinisCameraPerformanceMode.auto) {
+      final inferred = await inferMinisCameraPerformanceMode();
+      return resolutionPresetForMinisMode(inferred);
+    }
+    return resolutionPresetForMinisMode(performanceMode);
+  }
+
+  Future<void> _ensureSessionPrimaryPreset() async {
+    _sessionPrimaryPreset ??= await _resolvePrimaryPreset();
+  }
 
   @override
   Future<void> initialize() async {
@@ -42,16 +74,48 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
     bool enableAudio,
   ) async {
     await _controller?.dispose();
+    _controller = null;
     _torchOn = false;
-    final next = CameraController(
-      description,
-      // ~1080p target; [high] is ~720p and looks soft next to merged exports.
-      ResolutionPreset.veryHigh,
-      enableAudio: enableAudio,
-      imageFormatGroup: ImageFormatGroup.yuv420,
+
+    await _ensureSessionPrimaryPreset();
+    final chain = minisPresetFallbackChain(_sessionPrimaryPreset!);
+
+    Object? lastError;
+    CameraController? created;
+    for (final preset in chain) {
+      try {
+        created = CameraController(
+          description,
+          preset,
+          enableAudio: enableAudio,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+        );
+        await created.initialize();
+        _controller = created;
+        created = null;
+
+        if (kDebugMode) {
+          debugPrint(
+            'MINIS_CAMERA: init ok preset=$preset mode=$performanceMode '
+            'primary=$_sessionPrimaryPreset',
+          );
+        }
+        return;
+      } catch (e, st) {
+        lastError = e;
+        if (kDebugMode) {
+          debugPrint('MINIS_CAMERA: init failed preset=$preset: $e\n$st');
+        }
+        await created?.dispose();
+        created = null;
+        _controller = null;
+      }
+    }
+
+    throw StateError(
+      'Camera initialization failed for all resolution rungs (from '
+      '${chain.first}): $lastError',
     );
-    _controller = next;
-    await next.initialize();
   }
 
   @override
