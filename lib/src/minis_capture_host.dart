@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:loopit_minis/src/minis_handoff_widgets.dart';
 
 /// Builds the full-screen **Minis capture** UI (multi-clip reels camera).
 ///
@@ -50,8 +51,10 @@ abstract final class MinisCaptureHost {
   /// dashboard/home until the host runs [normalize] / [Get.to].
   static OverlayEntry? _handoffOverlayEntry;
 
-  /// 0–1 merge / export progress for the handoff overlay (host may call from background work).
-  static double _handoffProgress = 0;
+  static final ValueNotifier<double?> _handoffProgress =
+      ValueNotifier<double?>(null);
+  static final ValueNotifier<String?> _handoffError =
+      ValueNotifier<String?>(null);
 
   /// Host supplies [LoopItCameraScreen(mode: reels)] (or equivalent).
   static void register(MinisCaptureWidgetBuilder builder) {
@@ -69,7 +72,8 @@ abstract final class MinisCaptureHost {
     _musicPicker = null;
     _captureResultCompleter = null;
     _handoffOverlayEntry = null;
-    _handoffProgress = 0;
+    _handoffProgress.value = null;
+    _handoffError.value = null;
   }
 
   /// Whether [register] has been called.
@@ -148,6 +152,19 @@ abstract final class MinisCaptureHost {
   /// [dismissHandoffOverlay]).
   static bool get hasHandoffOverlay => _handoffOverlayEntry != null;
 
+  /// Updates the progress percentage (0.0 to 1.0) shown in the handoff overlay.
+  static void updateHandoffProgress(double progress) {
+    _handoffProgress.value = progress.clamp(0.0, 1.0);
+  }
+
+  /// Public access to handoff progress (0.0 to 1.0) for the host app's UI.
+  static ValueNotifier<double?> get handoffProgressNotifier => _handoffProgress;
+
+  /// Displays an error message in the handoff overlay.
+  static void reportHandoffError(Object error) {
+    _handoffError.value = error.toString();
+  }
+
   static void _insertHandoffOverlay() {
     if (_handoffOverlayEntry != null) return;
     final ctx = Get.overlayContext ?? Get.key.currentContext;
@@ -155,65 +172,75 @@ abstract final class MinisCaptureHost {
     final overlay = Overlay.maybeOf(ctx);
     if (overlay == null) return;
 
-    _handoffProgress = 0;
+    _handoffProgress.value = null;
+    _handoffError.value = null;
+
     _handoffOverlayEntry = OverlayEntry(
       builder: (context) => Positioned.fill(
         child: Material(
-          color: Colors.black.withValues(alpha: 0.65),
+          color: Colors.black.withValues(alpha: 0.85),
           child: Center(
-            child: _handoffProgress > 0 && _handoffProgress < 1
-                ? Padding(
+            child: ValueListenableBuilder<String?>(
+              valueListenable: _handoffError,
+              builder: (context, error, _) {
+                if (error != null) {
+                  return Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 40),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: _handoffProgress.clamp(0.0, 1.0),
-                            minHeight: 6,
-                            backgroundColor: Colors.white24,
-                            color: Colors.white,
-                          ),
+                        const Icon(
+                          Icons.error_outline,
+                          color: Colors.redAccent,
+                          size: 56,
                         ),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: 24),
                         Text(
-                          '${(_handoffProgress * 100).round()}%',
+                          error,
+                          textAlign: TextAlign.center,
                           style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                            height: 1.4,
+                          ),
+                        ),
+                        const SizedBox(height: 32),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: dismissHandoffOverlay,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.white24,
+                              foregroundColor: Colors.white,
+                            ),
+                            child: const Text('Close'),
                           ),
                         ),
                       ],
                     ),
-                  )
-                : const SizedBox(
-                    width: 40,
-                    height: 40,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.white,
-                    ),
-                  ),
+                  );
+                }
+
+                return ValueListenableBuilder<double?>(
+                  valueListenable: _handoffProgress,
+                  builder: (context, progress, _) {
+                    return Center(
+                      child: MinisProgressIndicator(
+                        progress: progress,
+                        message: progress != null
+                            ? 'Processing video…'
+                            : 'Preparing minis…',
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
           ),
         ),
       ),
     );
     overlay.insert(_handoffOverlayEntry!);
-  }
-
-  /// Updates indeterminate / determinate handoff UI when the host runs long work
-  /// (e.g. Minis clip merge). No-op if no overlay is showing.
-  static void updateHandoffProgress(double progress) {
-    _handoffProgress = progress.clamp(0.0, 1.0);
-    _handoffOverlayEntry?.markNeedsBuild();
-  }
-
-  /// Dismisses the handoff overlay and surfaces [e] to the user (e.g. merge failed).
-  static void reportHandoffError(Object e) {
-    dismissHandoffOverlay();
-    _snack('Could not finish video: $e');
   }
 
   /// Removes the loader shown during capture handoff. Safe to call when none
@@ -222,7 +249,8 @@ abstract final class MinisCaptureHost {
     final e = _handoffOverlayEntry;
     if (e == null) return;
     _handoffOverlayEntry = null;
-    _handoffProgress = 0;
+    _handoffProgress.value = null;
+    _handoffError.value = null;
     e.remove();
   }
 

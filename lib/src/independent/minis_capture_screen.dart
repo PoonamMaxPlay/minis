@@ -27,6 +27,7 @@ import 'package:loopit_minis/src/independent/minis_recording_ring_painter.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
+import 'package:loopit_minis/src/minis_handoff.dart';
 import 'package:loopit_minis/src/native_video_trim_user_message.dart'
     show logVideoTrimDiagnostic, messageForVideoTrimFailure;
 import 'package:loopit_minis/src/session_and_toast.dart';
@@ -2057,8 +2058,10 @@ class _MinisIndependentCaptureScreenState
         rawPaths,
         title: 'Preview',
         confirmLabel: 'Use minis',
-        allowReelTrim: minisReelClipTrimmerPlatformSupported() && rawPaths.length == 1,
+        allowReelTrim:
+            minisReelClipTrimmerPlatformSupported() && rawPaths.length == 1,
         confirmOnClose: true,
+        initialTotalDurationMs: _clipsTotalDurationMs,
       );
       if (!mounted) return;
       if (preview == null || preview.path.isEmpty) {
@@ -2083,15 +2086,15 @@ class _MinisIndependentCaptureScreenState
         final pathsToMerge = hasMultipleClips ? rawPaths : [postPreviewPath];
         _videoClips.clear();
         _clipsTotalDurationMs = 0;
-        
-        final mergeRequest = <String, Object?>{
-          'minis_action': 'merge_required',
-          'clipPaths': pathsToMerge,
-          'playbackSpeed': _speedSteps[_speedIndex],
-          'enableAudio': _micEnabled,
-          'backgroundMusic': _musicSegment,
-        };
-        MinisCaptureHost.completeCaptureResult(mergeRequest);
+
+        final mergeRequest = MinisHandoffRequest(
+          action: MinisHandoffAction.mergeRequired,
+          clipPaths: pathsToMerge,
+          playbackSpeed: _speedSteps[_speedIndex],
+          enableAudio: _micEnabled,
+          backgroundMusic: _musicSegment,
+        );
+        MinisCaptureHost.completeCaptureResult(mergeRequest.toMap());
         if (!mounted) return;
         final nav = Navigator.maybeOf(context, rootNavigator: true);
         if (nav != null && nav.canPop()) nav.pop();
@@ -2844,7 +2847,7 @@ class _MinisIndependentCaptureScreenState
             Positioned.fill(
               child: AbsorbPointer(
                 child: ColoredBox(
-                  color: Colors.black.withValues(alpha: 0.65),
+                  color: Colors.black.withValues(alpha: 0.8),
                   child: Center(
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 280),
@@ -2852,20 +2855,21 @@ class _MinisIndependentCaptureScreenState
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           const SizedBox(
-                            width: 40,
-                            height: 40,
+                            width: 64,
+                            height: 64,
                             child: CircularProgressIndicator(
-                              strokeWidth: 2.8,
+                              strokeWidth: 3.5,
                               color: Colors.white,
+                              backgroundColor: Colors.white12,
                             ),
                           ),
-                          const SizedBox(height: 20),
+                          const SizedBox(height: 24),
                           Text(
                             _busyMessage.isEmpty ? 'Please wait…' : _busyMessage,
                             textAlign: TextAlign.center,
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 15,
+                              fontSize: 16,
                               fontWeight: FontWeight.w500,
                               height: 1.3,
                             ),
