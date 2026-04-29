@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'package:path/path.dart' as p;
 
 import 'package:flutter/foundation.dart';
 import 'package:pro_video_editor/pro_video_editor.dart';

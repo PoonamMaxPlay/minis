@@ -129,9 +129,12 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
 
 bool _pickedXFileIsVideo(XFile x) {
   final mt = x.mimeType?.toLowerCase();
-  if (mt != null && mt.startsWith('video/')) return true;
+  if (mt != null) {
+    if (mt.startsWith('video/')) return true;
+    if (mt.startsWith('image/')) return false;
+  }
   final path = x.path.toLowerCase();
-  const v = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.3gp'];
+  const v = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.3gp', '.avi', '.flv', '.wmv'];
   for (final ext in v) {
     if (path.endsWith(ext)) return true;
   }
@@ -1134,14 +1137,13 @@ class _MinisIndependentCaptureScreenState
       );
 
       if (!isVideo) {
-        final edited = await openMinisProImageEditor(context, path);
-        if (!mounted) return true;
-        if (edited != null && edited.isNotEmpty) {
-          debugPrint('MINIS_FLOW capture: gallery image edited path=$edited');
-          _deliverConfirmedCapture(edited);
-        } else {
-          _toast('Image edit cancelled');
+        if (widget.videoOnly) {
+          _logGallery('mixed pick returned non-video (videoOnly=true), rejecting');
+          await _showVideoOnlyImageDialog();
+          return true;
         }
+        _logGallery('mixed pick returned image (videoOnly=false), proceeding with handoff');
+        _deliverConfirmedCapture(path);
         return true;
       }
 
@@ -1175,14 +1177,26 @@ class _MinisIndependentCaptureScreenState
     final src = await _resolveLocalPathFromPlatformFile(f);
     if (src == null || src.isEmpty) {
       _logGallery('no source after FilePicker');
-      _toast('Could not read the selected video file.');
+      _toast('Could not read the selected file.');
       return;
     }
+    
+    // STRICT VERIFICATION: Reject if not identified as video
+    if (!_pickedXFileIsVideo(XFile(src, name: f.name))) {
+      _logGallery('FilePicker returned non-video, REJECTING');
+      await _showVideoOnlyImageDialog();
+      return;
+    }
+
     await _importPickedGalleryVideoFromSourcePath(src);
   }
 
-  /// Materialize, preview, and append — shared by [ImagePicker] and desktop [FilePicker].
   Future<void> _importPickedGalleryVideoFromSourcePath(String sourcePath) async {
+    if (!_pickedXFileIsVideo(XFile(sourcePath))) {
+      _logGallery('importPickedGalleryVideo: REJECTED non-video path');
+      await _showVideoOnlyImageDialog();
+      return;
+    }
     _logGallery(
       'import enter mergeSupported=${minisMulticlipMergeSupported()}',
     );
@@ -1942,41 +1956,43 @@ class _MinisIndependentCaptureScreenState
       return;
     }
     try {
-      if (widget.videoOnly) {
-        _logGallery(
-          'videoOnly → FilePicker(video) platform=$defaultTargetPlatform',
-        );
-        await _openGalleryVideoViaFilePicker();
-        return;
-      }
-
       if (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
-              defaultTargetPlatform == TargetPlatform.iOS ||
-              defaultTargetPlatform == TargetPlatform.macOS)) {
-        _logGallery('mixed story/feed → FilePicker(media) native');
-        final handled = await _openGalleryMixedMediaViaFilePicker();
-        if (handled) return;
-        _logGallery('mixed FilePicker failed — fallback ImagePicker');
+              defaultTargetPlatform == TargetPlatform.iOS)) {
+        if (widget.videoOnly) {
+          _logGallery('videoOnly enforcement → using FilePicker(video)');
+          await _openGalleryVideoViaFilePicker();
+          return;
+        } else {
+          _logGallery('mixed media allowed → trying FilePicker(media)');
+          final handled = await _openGalleryMixedMediaViaFilePicker();
+          if (handled) return;
+        }
       }
 
       final picker = ImagePicker();
       XFile? x;
 
       try {
-        _logGallery('pickMedia starting');
-        x = await picker.pickMedia(imageQuality: 92);
-        _logGallery('pickMedia done null=${x == null}');
-      } catch (e1) {
-        // pickMedia is not available on all plugin versions / Android variants.
-        _logMulticlip('pickMedia failed ($e1) — trying pickVideo fallback');
-        if (mounted) {
-          _toast('Media picker limited — falling back to video/image picker.');
+        _logGallery('picker selection starting videoOnly=${widget.videoOnly}');
+        if (widget.videoOnly) {
+          x = await picker.pickVideo(source: ImageSource.gallery);
+        } else {
+          // pickMedia is available on newer plugin versions
+          x = await picker.pickMedia();
         }
+        _logGallery('picker done null=${x == null}');
+      } catch (e1) {
+        _logMulticlip('primary picker failed ($e1) — trying fallbacks');
         try {
           x = await picker.pickVideo(source: ImageSource.gallery);
         } catch (e2) {
-          _logMulticlip('pickVideo fallback also failed ($e2) — trying pickImage');
+          if (widget.videoOnly) {
+            _logMulticlip('videoOnly=true, pickVideo failed, ABORTING');
+            if (mounted) _toast(minisUserFriendlyException(e2));
+            return;
+          }
+          _logMulticlip('pickVideo failed, trying pickImage');
           try {
             x = await picker.pickImage(
               source: ImageSource.gallery,
@@ -2013,27 +2029,18 @@ class _MinisIndependentCaptureScreenState
       final isVideo = _pickedXFileIsVideo(
         XFile(path, mimeType: x.mimeType, name: x.name),
       );
-      _logMulticlip(
-        'picked path=${p.basename(path)} isVideo=$isVideo mime=${x.mimeType}',
-      );
-
-      if (!isVideo) {
+      if (isVideo) {
+        _logGallery('picked video — importing');
+        await _importPickedGalleryVideoFromSourcePath(path);
+      } else {
         if (widget.videoOnly) {
+          _logGallery('not a video (videoOnly=true) — blocking');
           await _showVideoOnlyImageDialog();
-          return;
-        }
-        final edited = await openMinisProImageEditor(context, path);
-        if (!mounted) return;
-        if (edited != null && edited.isNotEmpty) {
-          debugPrint('MINIS_FLOW capture: gallery image edited path=$edited');
-          _deliverConfirmedCapture(edited);
         } else {
-          _toast('Image edit cancelled');
+          _logGallery('picked image (videoOnly=false) — delivering');
+          _deliverConfirmedCapture(path);
         }
-        return;
       }
-
-      await _importPickedGalleryVideoFromSourcePath(path);
     } catch (e, st) {
       _logMulticlip('Gallery error: $e\n$st');
       if (mounted) {

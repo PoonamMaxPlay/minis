@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'package:path/path.dart' as p;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
@@ -139,6 +140,11 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     }
     if (ratio.isNaN || ratio.isInfinite || ratio <= 0) return 1.0;
     return ratio;
+  }
+
+  bool _isPathImage(String path) {
+    final ext = p.extension(path).toLowerCase();
+    return ext == '.jpg' || ext == '.jpeg' || ext == '.png' || ext == '.webp';
   }
 
   /// When set, preview reads this file; delete on dispose (not the handoff [_path]).
