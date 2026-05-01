@@ -2348,10 +2348,37 @@ class _MinisIndependentCaptureScreenState
     try {
       setState(() => _recording = false);
       _applyBusy(true, message: 'Saving…');
-      final path = await eng.stopRecording();
+      final rawPath = await eng.stopRecording();
       if (!mounted) return;
       _zoomGesturePointer = null;
-      if (path != null && path.isNotEmpty) {
+      if (rawPath != null && rawPath.isNotEmpty) {
+        // iOS: The camera plugin saves to tmp/ which is inaccessible to
+        // AVAssetExportSession during composition (OSStatus error -12660).
+        // Copy to Documents/loopit_minis_captures/ first on iOS.
+        String path = rawPath;
+        if (defaultTargetPlatform == TargetPlatform.iOS &&
+            rawPath.contains('/tmp/')) {
+          try {
+            final base = await getApplicationDocumentsDirectory();
+            final dir =
+                Directory(p.join(base.path, 'loopit_minis_captures'));
+            if (!await dir.exists()) await dir.create(recursive: true);
+            final ext = p.extension(rawPath);
+            final dest = p.join(
+              dir.path,
+              'minis_cam_${DateTime.now().microsecondsSinceEpoch}$ext',
+            );
+            await File(rawPath).copy(dest);
+            path = dest;
+            // Clean up tmp file after copy.
+            try {
+              await File(rawPath).delete();
+            } catch (_) {}
+          } catch (copyErr) {
+            debugPrint('MINIS: tmp→docs copy failed: $copyErr — using raw path');
+            path = rawPath;
+          }
+        }
         final d = math.max(1, rawElapsed);
         // Avoid probing duration on fresh camera clips — VideoPlayer init
         // freezes the active camera preview on many Android devices!

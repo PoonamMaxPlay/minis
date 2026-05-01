@@ -15,6 +15,62 @@ import 'package:loopit_minis/src/minis_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:video_player/video_player.dart' as vp;
 
+/// iOS: AVAssetExportSession cannot read files from tmp/ during composition,
+/// and AVPlayer cannot play files from Library/Caches.
+/// This helper copies any tmp/ clips to Documents and returns safe paths.
+/// On Android this is a no-op — returns original paths unchanged.
+Future<List<String>> _sanitizeClipPathsForIos(List<String> paths) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return paths;
+  final base = await getApplicationDocumentsDirectory();
+  final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+  if (!await dir.exists()) await dir.create(recursive: true);
+
+  final result = <String>[];
+  for (final path in paths) {
+    if (path.contains('/tmp/') || path.contains('/Caches/')) {
+      try {
+        final ext = p.extension(path);
+        final dest = p.join(
+          dir.path,
+          'minis_safe_${DateTime.now().microsecondsSinceEpoch}$ext',
+        );
+        await File(path).copy(dest);
+        result.add(dest);
+        // Best-effort cleanup of source.
+        try { await File(path).delete(); } catch (_) {}
+      } catch (e) {
+        dev.log('minis: clip copy failed for $path: $e', name: 'MinisMerge');
+        result.add(path); // fallback to original
+      }
+    } else {
+      result.add(path);
+    }
+  }
+  return result;
+}
+
+/// On iOS, AVAssetExportSession writes to Caches (tmp), but AVPlayer
+/// cannot play files from there (-12660). After export, copy to Documents.
+Future<String> _copyToDocumentsIfIos(String cachePath) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return cachePath;
+  try {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+    if (!await dir.exists()) await dir.create(recursive: true);
+    final ext = p.extension(cachePath);
+    final dest = p.join(
+      dir.path,
+      'minis_reel_${DateTime.now().microsecondsSinceEpoch}$ext',
+    );
+    await File(cachePath).copy(dest);
+    try { await File(cachePath).delete(); } catch (_) {}
+    return dest;
+  } catch (e) {
+    dev.log('minis: cache→docs copy failed: $e', name: 'MinisMerge');
+    return cachePath; // fallback
+  }
+}
+
 /// Same platforms as [proVideoEditorRenderExportSupported] in hub (no web).
 bool minisMulticlipMergeSupported() {
   if (kIsWeb) return false;
@@ -80,8 +136,8 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
-  final dir = await getTemporaryDirectory();
-  final outPath = p.join(dir.path, 'minis_reel_$id.mp4');
+  final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
+  final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
 
   List<VideoAudioTrack> audioTracks = const [];
   final seg = backgroundMusic;
@@ -117,7 +173,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   // would still succeed with fixed scales + quality bitrate.
   final data = VideoRenderData.withQualityPreset(
     id: id,
-    videoSegments: clipPaths
+    videoSegments: safeClipPaths
         .map(
           (path) => VideoSegment(
             video: EditorVideo.file(File(path)),
@@ -157,8 +213,9 @@ Future<String?> mergeMinisVideoClipsWithDialog({
 
   try {
     await future;
-    _logMergedVideoFileProbe(outPath);
-    return outPath;
+    final finalPath = await _copyToDocumentsIfIos(outPath);
+    _logMergedVideoFileProbe(finalPath);
+    return finalPath;
   } on RenderCanceledException {
     return null;
   } catch (_) {
@@ -181,8 +238,8 @@ Future<String?> mergeMinisVideoClipsSilent({
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
-  final dir = await getTemporaryDirectory();
-  final outPath = p.join(dir.path, 'minis_reel_$id.mp4');
+  final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
+  final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
 
   List<VideoAudioTrack> audioTracks = const [];
   final seg = backgroundMusic;
@@ -204,7 +261,7 @@ Future<String?> mergeMinisVideoClipsSilent({
 
   final data = VideoRenderData.withQualityPreset(
     id: id,
-    videoSegments: clipPaths
+    videoSegments: safeClipPaths
         .map((path) => VideoSegment(
               video: EditorVideo.file(File(path)),
               volume: clipVolume,
@@ -228,8 +285,9 @@ Future<String?> mergeMinisVideoClipsSilent({
   try {
     await ProVideoEditor.instance.renderVideoToFile(outPath, data);
     await progressSub?.cancel();
-    _logMergedVideoFileProbe(outPath);
-    return outPath;
+    final finalPath = await _copyToDocumentsIfIos(outPath);
+    _logMergedVideoFileProbe(finalPath);
+    return finalPath;
   } on RenderCanceledException {
     await progressSub?.cancel();
     return null;

@@ -32,6 +32,10 @@ dependencies:
   video_compress: ^3.1.4
 
 
+dependency_overrides:
+  video_thumbnail:
+    path: packages/video_thumbnail_mock
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -39,3 +43,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  plugin:
+    platforms:
+      android:
+        package: com.loopit.minis
+        pluginClass: LoopitMinisPlugin
+      ios:
+        pluginClass: LoopitMinisPlugin
