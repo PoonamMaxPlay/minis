@@ -644,8 +644,11 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
     _completionSub?.cancel();
     _scrollController.removeListener(_onScrollChanged);
     _scrollController.dispose();
-    unawaited(_audioPlayer.pausePlayer());
-    unawaited(_audioPlayer.release());
+    unawaited(
+      _audioPlayer.pausePlayer().catchError((_) {}).then((_) {
+        _audioPlayer.release().catchError((_) {});
+      }),
+    );
     _audioPlayer.dispose();
     super.dispose();
   }

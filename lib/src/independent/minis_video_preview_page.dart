@@ -511,14 +511,15 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   @override
   void dispose() {
     _controller?.removeListener(_onVideoTick);
-    _controller?.pause();
-    _controller?.dispose();
+    // Pause before dispose so the platform side stops decoding frames first.
+    unawaited(_controller?.pause().catchError((_) {}).then((_) {
+      _controller?.dispose();
+    }) ?? Future<void>.value());
     _nativeController?.dispose();
     if (_tempDecodePath != null) {
-      try {
-        File(_tempDecodePath!).deleteSync();
-      } catch (_) {}
+      final path = _tempDecodePath!;
       _tempDecodePath = null;
+      unawaited(File(path).delete().catchError((_) {}));
     }
     super.dispose();
   }

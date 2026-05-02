@@ -330,7 +330,12 @@ class _MinisIndependentCaptureScreenState
   }
 
   Future<void> _retryCameraInit() async {
-    if (_webUnsupported || _engine == null) return;
+    if (_webUnsupported) return;
+    if (_engine == null) {
+      // Engine factory failed during _boot(); re-run the full boot sequence.
+      await _boot();
+      return;
+    }
     setState(() {
       _error = null;
       _busy = true;
@@ -486,9 +491,12 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _clipElapsedTicker?.cancel();
     _zoomBadgeTimer?.cancel();
-    unawaited(_disposeGuideMusic());
+
+    // Async cleanup must be fire-and-forget (dispose is synchronous), but we
+    // guard each call so platform callbacks arriving after teardown don't crash.
+    unawaited(_disposeGuideMusic().catchError((_) {}));
     if (_ownEngine) {
-      unawaited(_engine?.dispose());
+      unawaited(_engine?.dispose().catchError((_) {}) ?? Future<void>.value());
     }
     super.dispose();
   }
@@ -2842,7 +2850,39 @@ class _MinisIndependentCaptureScreenState
     final topPad = MediaQuery.paddingOf(context).top;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
 
-    return Scaffold(
+    return PopScope(
+      canPop: !_recording && _videoClips.isEmpty,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        if (_recording) {
+          _toast('Stop recording before leaving.');
+          return;
+        }
+        // Has clips — confirm discard.
+        showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Discard clips?'),
+            content: Text(
+              '${_videoClips.length} clip${_videoClips.length == 1 ? '' : 's'} '
+              'will be lost.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Keep editing'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Discard'),
+              ),
+            ],
+          ),
+        ).then((discard) {
+          if (discard == true && mounted) Navigator.of(context).pop();
+        });
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
@@ -3421,6 +3461,7 @@ class _MinisIndependentCaptureScreenState
           ),
         ],
       ),
+    ),
     );
   }
 }

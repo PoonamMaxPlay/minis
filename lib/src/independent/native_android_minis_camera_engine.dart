@@ -107,7 +107,6 @@ class NativeAndroidMinisCameraEngine implements MinisCameraEnginePort {
 
   @override
   Future<void> dispose() async {
-    if (!_initialized) return;
     _initialized = false;
     try {
       await _channel.invokeMethod<dynamic>('dispose');

@@ -71,7 +71,7 @@ abstract final class MinisCaptureHost {
     _builder = null;
     _musicPicker = null;
     _captureResultCompleter = null;
-    _handoffOverlayEntry = null;
+    dismissHandoffOverlay();
     _handoffProgress.value = null;
     _handoffError.value = null;
   }

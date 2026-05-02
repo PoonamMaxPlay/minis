@@ -208,10 +208,9 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
   @override
   void dispose() {
     if (_repairTempPath != null) {
-      try {
-        File(_repairTempPath!).deleteSync();
-      } catch (_) {}
+      final path = _repairTempPath!;
       _repairTempPath = null;
+      unawaited(File(path).delete().catchError((_) {}));
     }
     // Do not call [VideoPlayerController.dispose] here: [video_trimmer]'s
     // [FixedTrimViewer]/[ScrollableTrimViewer] already dispose the shared
