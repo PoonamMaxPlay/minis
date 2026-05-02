@@ -173,6 +173,7 @@ Future<String?> mergeMinisVideoClipsSilent({
   required double playbackSpeed,
   required bool enableAudio,
   MinisMusicSegment? backgroundMusic,
+  VideoQualityPreset qualityPreset = VideoQualityPreset.p1080High,
 }) async {
   if (clipPaths.isEmpty) return null;
   if (!minisMulticlipMergeSupported()) return null;
@@ -210,7 +211,7 @@ Future<String?> mergeMinisVideoClipsSilent({
               volume: clipVolume,
             ))
         .toList(),
-    qualityPreset: VideoQualityPreset.p1080High,
+    qualityPreset: qualityPreset,
     outputFormat: VideoOutputFormat.mp4,
     playbackSpeed: playbackSpeed,
     enableAudio: enableAudio,
