@@ -365,7 +365,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(
-          capSec != null ? 'Trim (up to ${capSec}s for this mini)' : 'Trim clip',
+          capSec != null ? 'Trim (max ${capSec}s)' : 'Trim clip',
         ),
         actions: [
           TextButton(

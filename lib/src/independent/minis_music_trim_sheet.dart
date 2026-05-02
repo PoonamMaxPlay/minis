@@ -740,7 +740,7 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Drag the full waveform; the purple band is your minis cap. '
+                  'Drag the full waveform; the purple band is your time limit. '
                   'The start time (above) moves as you scroll. Tap play to preview.',
                   style: theme.textTheme.bodySmall,
                 ),

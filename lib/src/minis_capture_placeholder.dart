@@ -52,7 +52,7 @@ class MinisCapturePlaceholder extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
-                      'Minis capture',
+                      'Video capture',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                             color: Colors.white,

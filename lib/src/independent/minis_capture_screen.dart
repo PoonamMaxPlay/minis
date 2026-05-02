@@ -419,7 +419,7 @@ class _MinisIndependentCaptureScreenState
                 const SizedBox(height: 8),
                 Text(
                   mergeSupported
-                      ? 'You already have video clips in this mini. Merge your minis, remove the last clip, or keep recording video.'
+                      ? 'You already have video clips. Merge your clips, remove the last clip, or keep recording video.'
                       : 'You already have video clips. Remove the last clip or keep recording video.',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.78),
@@ -434,7 +434,7 @@ class _MinisIndependentCaptureScreenState
                       Navigator.pop(ctx);
                       unawaited(_confirmClip());
                     },
-                    child: const Text('Merge minis'),
+                    child: const Text('Merge clips'),
                   ),
                   const SizedBox(height: 10),
                 ],
@@ -736,7 +736,7 @@ class _MinisIndependentCaptureScreenState
     final capMs = _sessionCapMs;
     final cap = minisFormatClipDurationLabel(capMs);
     if (_videoClips.isEmpty && !_recording) {
-      return 'Minis max $cap';
+      return 'Max $cap';
     }
     final usedMs =
         _clipsTotalDurationMs + (_recording ? _liveClipElapsedMs : 0);
@@ -1278,7 +1278,7 @@ class _MinisIndependentCaptureScreenState
     final remainingMs =
         _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
     if (remainingMs < 500) {
-      _toast('No time left in this mini.');
+      _toast('No time left.');
       try {
         await File(materialized).delete();
       } catch (_) {}
@@ -1323,7 +1323,7 @@ class _MinisIndependentCaptureScreenState
       }
       final remSec = (remainingMs / 1000).ceil();
       _toast(
-        'Trim which ${remSec}s or less to add (${remSec}s left in this mini).',
+        'Trim to ${remSec}s or less to add (${remSec}s left).',
       );
       if (!mounted) return;
       _applyBusy(true, message: 'Opening trim…');
@@ -1349,7 +1349,7 @@ class _MinisIndependentCaptureScreenState
       }
       final outMs = trimOut.durationMs;
       if (outMs <= 0 || _clipsTotalDurationMs + outMs > _sessionCapMs) {
-        _toast('Trimmed segment does not fit this mini.');
+        _toast('Trimmed segment is too long.');
         try {
           await File(trimOut.path).delete();
         } catch (_) {}
@@ -1530,7 +1530,7 @@ class _MinisIndependentCaptureScreenState
     }
 
     if (_clipsTotalDurationMs + useMs > _sessionCapMs) {
-      _toast("That clip no longer fits this mini's time limit.");
+      _toast("That clip exceeds the time limit.");
       return false;
     }
     final clipId = _nextClipId++;
@@ -1623,7 +1623,7 @@ class _MinisIndependentCaptureScreenState
           await minisFinalizeClipDurationMs(result.durationMs, result.path);
       final delta = newMs - clip.durationMs;
       if (_clipsTotalDurationMs + delta > _sessionCapMs) {
-        _toast("Trimmed clip no longer fits this mini's time cap.");
+        _toast("Trimmed clip exceeds the time limit.");
         try {
           await File(result.path).delete();
         } catch (_) {}
@@ -1734,7 +1734,7 @@ class _MinisIndependentCaptureScreenState
         _logMulticlip(
           'REJECT: over cap after preview (sum=$sum cap=$cap) — should be rare',
         );
-        _toast('That clip no longer fits the time limit for this mini. Try again.');
+        _toast('That clip exceeds the time limit. Try again.');
         return;
       }
       _logMulticlip('calling _appendVideoSegment');
@@ -2072,7 +2072,7 @@ class _MinisIndependentCaptureScreenState
         context,
         rawPaths,
         title: 'Preview',
-        confirmLabel: 'Use minis',
+        confirmLabel: 'Next',
         allowReelTrim:
             minisReelClipTrimmerPlatformSupported() && rawPaths.length == 1,
         confirmOnClose: true,
@@ -2304,7 +2304,7 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
     if (_clipsTotalDurationMs >= _sessionCapMs) {
-      _toast('Minis time limit reached. Tap check to merge or remove a clip.');
+      _toast('Time limit reached. Tap check to merge or remove a clip.');
       return;
     }
     final budgetMs = _sessionCapMs - _clipsTotalDurationMs;
@@ -2329,7 +2329,7 @@ class _MinisIndependentCaptureScreenState
           unawaited(
             _stopRecordingInternal(
               userMessage:
-                  'Max minis time reached for this segment ($_speedRailLabel)',
+                  'Max time reached for this segment ($_speedRailLabel)',
             ),
           );
         }
@@ -2477,7 +2477,7 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
     if (_clipsTotalDurationMs >= _sessionCapMs) {
-      _toast('Minis time limit reached.');
+      _toast('Time limit reached.');
       return;
     }
     // Bug 8 fix: cancel any in-progress zoom gesture when the shutter goes
@@ -2513,7 +2513,7 @@ class _MinisIndependentCaptureScreenState
       return;
     }
     if (widget.videoOnly) {
-      _toast('Minis is video only — hold to record.');
+      _toast('Video only \u2014 hold to record.');
       return;
     }
     unawaited(_shutterShortTapPhoto());
@@ -2772,7 +2772,7 @@ class _MinisIndependentCaptureScreenState
     if (_webUnsupported) {
       return Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(title: const Text('Minis')),
+        appBar: AppBar(title: const Text('Camera')),
         body: const Center(
           child: Padding(
             padding: EdgeInsets.all(24),
@@ -2789,7 +2789,7 @@ class _MinisIndependentCaptureScreenState
     if (_permissionDenied) {
       return Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(title: const Text('Minis')),
+        appBar: AppBar(title: const Text('Camera')),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -2822,7 +2822,7 @@ class _MinisIndependentCaptureScreenState
     if (_error != null) {
       return Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(title: const Text('Minis')),
+        appBar: AppBar(title: const Text('Camera')),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -3402,7 +3402,7 @@ class _MinisIndependentCaptureScreenState
                                 Padding(
                                   padding: const EdgeInsets.only(bottom: 6),
                                   child: Text(
-                                    'Merge minis',
+                                    'Merge clips',
                                     textAlign: TextAlign.center,
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,

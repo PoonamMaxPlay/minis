@@ -9,6 +9,6 @@ void main() {
         home: MinisCapturePlaceholder(),
       ),
     );
-    expect(find.textContaining('Minis capture'), findsOneWidget);
+    expect(find.textContaining('Video capture'), findsOneWidget);
   });
 }

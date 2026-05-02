@@ -350,7 +350,7 @@ class _VideoClipInsightPageState extends State<VideoClipInsightPage> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Skim the clip — same preview step as Minis before you edit.',
+                'Skim the clip — preview before you edit.',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 12),
@@ -1224,7 +1224,7 @@ class _MinisVideoHubPageState extends State<MinisVideoHubPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Minis — tools'),
+        title: const Text('Video tools'),
         actions: [
           IconButton(
             tooltip: 'Pick video',
@@ -1347,7 +1347,7 @@ class _MinisVideoHubPageState extends State<MinisVideoHubPage> {
                                 const SizedBox(height: 4),
                                 Text(
                                   'See length, size, sound, and a filmstrip - '
-                                  'like Minis before you edit.',
+                                  'a preview before you edit.',
                                   style: Theme.of(context)
                                       .textTheme
                                       .bodySmall
