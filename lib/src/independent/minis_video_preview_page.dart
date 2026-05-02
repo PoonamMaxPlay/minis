@@ -519,7 +519,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     if (_tempDecodePath != null) {
       final path = _tempDecodePath!;
       _tempDecodePath = null;
-      unawaited(File(path).delete().catchError((_) {}));
+      unawaited(File(path).delete().catchError((_) => File(path)));
     }
     super.dispose();
   }
