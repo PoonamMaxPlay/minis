@@ -151,6 +151,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   bool _scrubbing = false;
   bool _confirmBusy = false;
   bool _isSwitchingVideo = false;
+  bool _isAdvancing = false;
   int? _probedDurationMs;
 
   @override
@@ -318,9 +319,46 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     }
     if (_scrubbing) return;
 
-    if (_isReady && !_isSwitchingVideo) {}
+    // Multi-clip: auto-advance to next clip when current one finishes.
+    if (_isMultiClip && _isReady && !_isAdvancing && !_isSwitchingVideo) {
+      final pos = c?.value.position ?? Duration.zero;
+      final dur = c?.value.duration ?? Duration.zero;
+      final playing = c?.value.isPlaying ?? false;
+      if (!playing && dur > Duration.zero && (dur - pos).inMilliseconds < 500) {
+        _isAdvancing = true;
+        unawaited(_advanceToNextClip());
+      }
+    }
 
     setState(() {});
+  }
+
+  Future<void> _advanceToNextClip() async {
+    _currentIndex = (_currentIndex + 1) % _paths.length;
+    _path = _paths[_currentIndex];
+
+    _controller?.removeListener(_onVideoTick);
+    await _controller?.pause();
+    await _controller?.dispose();
+    _controller = null;
+
+    if (!mounted) {
+      _isAdvancing = false;
+      return;
+    }
+
+    _isSwitchingVideo = true;
+    setState(() {});
+
+    await _bindAndPlay(_path, allowTempFallback: true);
+    if (mounted) {
+      setState(() {
+        _isAdvancing = false;
+        _isSwitchingVideo = false;
+      });
+    } else {
+      _isAdvancing = false;
+    }
   }
 
   Future<void> _openTrim() async {
@@ -378,7 +416,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     final c = _controller;
     if (!_isReady || _confirmBusy) return;
     setState(() => _confirmBusy = true);
-    final pathForResult = _path;
+    final pathForResult = _isMultiClip ? _paths.first : _path;
     try {
       if (!_isMultiClip && c != null) {
         await minisWaitForVideoControllerDuration(c);
@@ -545,7 +583,9 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
           foregroundColor: Colors.white,
           elevation: 0,
           title: Text(
-            widget.title,
+            _isMultiClip
+                ? '${widget.title} (${_currentIndex + 1}/${_paths.length})'
+                : widget.title,
             overflow: TextOverflow.ellipsis,
           ),
           leading: IconButton(
@@ -661,6 +701,32 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                         )
                       : Column(
                           children: [
+                            if (_isMultiClip)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 24, vertical: 6),
+                                child: Row(
+                                  children: List.generate(_paths.length, (i) {
+                                    return Expanded(
+                                      child: Container(
+                                        height: 3,
+                                        margin: EdgeInsets.only(
+                                            right: i < _paths.length - 1
+                                                ? 4
+                                                : 0),
+                                        decoration: BoxDecoration(
+                                          color: i <= _currentIndex
+                                              ? Colors.white
+                                              : Colors.white
+                                                  .withValues(alpha: 0.3),
+                                          borderRadius:
+                                              BorderRadius.circular(2),
+                                        ),
+                                      ),
+                                    );
+                                  }),
+                                ),
+                              ),
                             Expanded(
                               child: Center(
                                 child: Padding(
