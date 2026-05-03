@@ -157,6 +157,13 @@ Future<String?> mergeMinisVideoClipsWithDialog({
 
   try {
     await future;
+
+    final outFile = File(outPath);
+    if (!outFile.existsSync() || outFile.lengthSync() == 0) {
+      debugPrint('[mergeMinisVideoClipsWithDialog] output missing or empty');
+      return null;
+    }
+
     _logMergedVideoFileProbe(outPath);
     return outPath;
   } on RenderCanceledException {
@@ -229,6 +236,18 @@ Future<String?> mergeMinisVideoClipsSilent({
   try {
     await ProVideoEditor.instance.renderVideoToFile(outPath, data);
     await progressSub?.cancel();
+
+    // Validate output — ProVideoEditor can return without error but leave
+    // a zero-byte or missing file when FFmpeg fails silently.
+    final outFile = File(outPath);
+    if (!outFile.existsSync() || outFile.lengthSync() == 0) {
+      debugPrint('[mergeMinisVideoClipsSilent] output missing or empty: $outPath');
+      if (MinisCaptureHost.hasHandoffOverlay) {
+        MinisCaptureHost.reportHandoffError('Merge produced an empty file.');
+      }
+      return null;
+    }
+
     _logMergedVideoFileProbe(outPath);
     return outPath;
   } on RenderCanceledException {
