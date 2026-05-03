@@ -5,7 +5,6 @@ import 'package:path/path.dart' as p;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
-import 'package:loopit_minis/src/independent/minis_preview_player.dart';
 
 import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
@@ -69,13 +68,17 @@ class MinisVideoPreviewPage extends StatefulWidget {
     debugPrint(
       'MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open start pathCount=${videoPaths.length}',
     );
-    final ready = await waitUntilMinisVideoFileReady(videoPaths.first);
-    debugPrint(
-      'MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open after wait ready=$ready '
-      'contextMounted=${context.mounted}',
-    );
-    if (!ready || !context.mounted) {
-      return null;
+    // Skip file readiness polling when caller already knows duration
+    // (camera clips are fully written by the time stopRecording returns).
+    if (initialTotalDurationMs == null) {
+      final ready = await waitUntilMinisVideoFileReady(videoPaths.first);
+      debugPrint(
+        'MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open after wait ready=$ready '
+        'contextMounted=${context.mounted}',
+      );
+      if (!ready || !context.mounted) {
+        return null;
+      }
     }
     debugPrint(
         'MINIS_MULTICLIP: gallery:preview: MinisVideoPreviewPage.open pushing route');
@@ -104,13 +107,12 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   int _currentIndex = 0;
   late String _path;
   VideoPlayerController? _controller;
-  MinisPreviewPlayerController? _nativeController;
   bool get _isMultiClip => _paths.length > 1;
 
-  bool get _isReady => _isMultiClip ? (_nativeController?.isInitialized == true) : (_controller?.value.isInitialized == true);
-  bool get _isPlaying => _isMultiClip ? (_nativeController?.isPlaying == true) : (_controller?.value.isPlaying == true);
-  Duration get _currentPos => _isMultiClip ? (_nativeController?.position ?? Duration.zero) : (_controller?.value.position ?? Duration.zero);
-  int get _currentDurMs => _isMultiClip ? (_nativeController?.duration.inMilliseconds ?? 0) : (_controller?.value.duration.inMilliseconds ?? 0);
+  bool get _isReady => _controller?.value.isInitialized == true;
+  bool get _isPlaying => _controller?.value.isPlaying == true;
+  Duration get _currentPos => _controller?.value.position ?? Duration.zero;
+  int get _currentDurMs => _controller?.value.duration.inMilliseconds ?? 0;
   int get _totalDurMs {
     final p = _probedDurationMs ?? 0;
     final c = _currentDurMs;
@@ -126,17 +128,11 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
 
   double get _ar {
     double ratio = 1.0;
-    if (_isMultiClip) {
-      final w = _nativeController?.videoSize?.width ?? 0;
-      final h = _nativeController?.videoSize?.height ?? 0;
+    final val = _controller?.value;
+    if (val != null) {
+      final w = val.size.width;
+      final h = val.size.height;
       if (w > 0 && h > 0) ratio = w / h;
-    } else {
-      final val = _controller?.value;
-      if (val != null) {
-        final w = val.size.width;
-        final h = val.size.height;
-        if (w > 0 && h > 0) ratio = w / h;
-      }
     }
     if (ratio.isNaN || ratio.isInfinite || ratio <= 0) return 1.0;
     return ratio;
@@ -166,27 +162,18 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
 
     _probedDurationMs = widget.initialTotalDurationMs;
 
-    if (_isMultiClip && _probedDurationMs == null) {
-      unawaited(_probeAllClipsDuration());
-    } else if (_probedDurationMs == null) {
-      // Asynchronously probe duration in case VideoPlayer fails to read it.
-      minisFinalizeClipDurationMs(1, _path, fromGalleryFile: true).then((ms) {
-        if (mounted) setState(() => _probedDurationMs = ms);
-      });
+    if (_probedDurationMs == null) {
+      if (_isMultiClip) {
+        unawaited(_probeAllClipsDuration());
+      } else {
+        minisFinalizeClipDurationMs(1, _path, fromGalleryFile: true).then((ms) {
+          if (mounted) setState(() => _probedDurationMs = ms);
+        });
+      }
     }
 
-    if (_isMultiClip) {
-      _nativeController = MinisPreviewPlayerController(_paths);
-      _nativeController!.addListener(() {
-        if (mounted) setState(() {});
-      });
-      // Start fake player initialization
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        // Wait briefly for native creation
-      });
-    } else {
-      unawaited(_initPlaybackAsync());
-    }
+    // Always use VideoPlayerController for preview (plays the first clip).
+    unawaited(_initPlaybackAsync());
   }
 
   Future<void> _probeAllClipsDuration() async {
@@ -202,6 +189,8 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
 
   Future<void> _initPlaybackAsync() async {
     _isSwitchingVideo = true;
+    // Preserve known duration from constructor; only clear on re-init (trim).
+    final knownDuration = _probedDurationMs;
     _probedDurationMs = null;
     if (_tempDecodePath != null) {
       try {
@@ -209,10 +198,10 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       } catch (_) {}
       _tempDecodePath = null;
     }
-    
-    // For single clip, if we cleared probedDuration, re-start a best-effort probe
-    // in case the controller fails to read it later.
-    if (!_isMultiClip) {
+
+    if (knownDuration != null) {
+      _probedDurationMs = knownDuration;
+    } else if (!_isMultiClip) {
       minisFinalizeClipDurationMs(1, _path, fromGalleryFile: true).then((ms) {
         if (mounted && _path == widget.videoPaths[_currentIndex]) {
           setState(() => _probedDurationMs = ms);
@@ -415,10 +404,8 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       // Release preview decoder before any standalone probe
       final oldC = _controller;
       _controller?.removeListener(_onVideoTick);
-      _nativeController?.dispose();
       setState(() {
         _controller = null;
-        _nativeController = null;
       });
       await oldC?.pause();
       await oldC?.dispose();
@@ -515,7 +502,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     unawaited(_controller?.pause().catchError((_) {}).then((_) {
       _controller?.dispose();
     }) ?? Future<void>.value());
-    _nativeController?.dispose();
     if (_tempDecodePath != null) {
       final path = _tempDecodePath!;
       _tempDecodePath = null;
@@ -537,7 +523,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   @override
   Widget build(BuildContext context) {
     final c = _controller;
-    final nc = _nativeController;
     final theme = Theme.of(context);
     final showTrim =
         widget.allowReelTrim && minisReelClipTrimmerPlatformSupported();
@@ -670,7 +655,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                         ),
                       ),
                     )
-                  : (!_isReady && !_isMultiClip)
+                  : !_isReady
                       ? const Center(
                           child: CircularProgressIndicator(color: Colors.white),
                         )
@@ -697,16 +682,10 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                                           alignment: Alignment.center,
                                           children: [
                                             Positioned.fill(
-                                              child: _isMultiClip
-                                                  ? (nc != null
-                                                      ? MinisPreviewPlayerWidget(
-                                                          controller: nc)
-                                                      : const ColoredBox(
-                                                          color: Colors.black))
-                                                  : (c != null
-                                                      ? VideoPlayer(c)
-                                                      : const ColoredBox(
-                                                          color: Colors.black)),
+                                              child: c != null
+                                                  ? VideoPlayer(c)
+                                                  : const ColoredBox(
+                                                      color: Colors.black),
                                             ),
                                             if (!_isReady)
                                               const Center(
@@ -720,13 +699,9 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                                                 child: InkWell(
                                                   onTap: () {
                                                     if (_isPlaying) {
-                                                      _isMultiClip
-                                                          ? nc?.pause()
-                                                          : c?.pause();
+                                                      c?.pause();
                                                     } else {
-                                                      _isMultiClip
-                                                          ? nc?.play()
-                                                          : c?.play();
+                                                      c?.play();
                                                     }
                                                     setState(() {});
                                                   },
