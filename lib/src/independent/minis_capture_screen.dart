@@ -17,7 +17,6 @@ import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
 import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
 import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
-import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_multiclip_merge.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
@@ -25,7 +24,6 @@ import 'package:loopit_minis/src/independent/minis_music_trim_sheet.dart';
 import 'package:loopit_minis/src/independent/minis_recording_clip.dart';
 import 'package:loopit_minis/src/independent/minis_recording_ring_painter.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
-import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
 import 'package:loopit_minis/src/minis_handoff.dart';
 import 'package:loopit_minis/src/native_video_trim_user_message.dart'
@@ -2148,35 +2146,9 @@ class _MinisIndependentCaptureScreenState
               return;
             }
             if (mounted) {
-              _applyBusy(true, message: 'Preparing video…');
-            }
-            final ready = await waitUntilMinisVideoFileReady(merged);
-            if (!mounted) return;
-            if (!ready) {
-              _toast('Mixed video not ready.');
-              try {
-                await File(merged).delete();
-              } catch (_) {}
-              return;
-            }
-            if (!mounted) return;
-            if (mounted) {
-              _applyBusy(true, message: 'Encoding for device playback…');
-            }
-            var outForDelivery = merged;
-            final mixedNormalized =
-                await minisTranscodeToH264ForDevicePlayback(merged);
-            if (!mounted) return;
-            if (mixedNormalized != null) {
-              outForDelivery = mixedNormalized;
-              try {
-                await File(merged).delete();
-              } catch (_) {}
-            }
-            if (mounted) {
               _applyBusy(false);
             }
-            _deliverConfirmedCapture(outForDelivery);
+            _deliverConfirmedCapture(merged);
           } catch (e) {
             if (mounted) {
               _toast('Mix failed. ${minisUserFriendlyException(e)}');
