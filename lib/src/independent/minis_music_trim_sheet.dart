@@ -46,8 +46,8 @@ Future<MinisMusicSegment?> showMinisMusicTimingSheet(
   return showModalBottomSheet<MinisMusicSegment>(
     context: context,
     isScrollControlled: true,
-    isDismissible: false,
-    enableDrag: false,
+    isDismissible: true,
+    enableDrag: true,
     backgroundColor: Colors.transparent,
     builder: (ctx) {
       final h = (MediaQuery.sizeOf(ctx).height * 0.58).clamp(360.0, 560.0);

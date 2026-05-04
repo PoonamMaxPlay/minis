@@ -106,7 +106,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   }
 
   final duckClipAudio = audioTracks.isNotEmpty;
-  final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+  final clipVolume = duckClipAudio ? (enableAudio ? 0.15 : 0.0) : null;
 
   // Use the same quality path as hub export: plain [VideoRenderData] omits
   // [qualityConfig]/bitrate and the encoder can fall back to a much lower
@@ -195,6 +195,9 @@ Future<String?> mergeMinisVideoClipsSilent({
   List<VideoAudioTrack> audioTracks = const [];
   final seg = backgroundMusic;
   final music = seg?.path.trim();
+  if (music != null && music.isNotEmpty && !File(music).existsSync()) {
+    debugPrint('[mergeMinisVideoClipsSilent] WARNING: music file missing: $music');
+  }
   if (music != null && music.isNotEmpty && File(music).existsSync()) {
     audioTracks = [
       VideoAudioTrack(
@@ -208,7 +211,7 @@ Future<String?> mergeMinisVideoClipsSilent({
   }
 
   final duckClipAudio = audioTracks.isNotEmpty;
-  final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+  final clipVolume = duckClipAudio ? (enableAudio ? 0.15 : 0.0) : null;
 
   final data = VideoRenderData.withQualityPreset(
     id: id,

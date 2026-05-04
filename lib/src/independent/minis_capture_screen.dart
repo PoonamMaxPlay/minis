@@ -675,6 +675,20 @@ class _MinisIndependentCaptureScreenState
     await _startGuideMusicForRecording();
   }
 
+  /// Copy a picker/temp music file to durable app storage so it survives
+  /// until the background merge runs (picker temps are cleaned aggressively).
+  Future<MinisMusicSegment> _persistMusicSegment(MinisMusicSegment seg) async {
+    final src = File(seg.path);
+    if (!await src.exists()) return seg;
+    final dir = await getApplicationDocumentsDirectory();
+    final musicDir = Directory(p.join(dir.path, 'minis_music'));
+    if (!await musicDir.exists()) await musicDir.create(recursive: true);
+    final ext = p.extension(seg.path).isNotEmpty ? p.extension(seg.path) : '.m4a';
+    final dest = p.join(musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext');
+    await src.copy(dest);
+    return MinisMusicSegment(path: dest, startMs: seg.startMs, endMs: seg.endMs);
+  }
+
   Future<void> _clearMusic() async {
     if (_recording || _busy || _countingDown) return;
     await _pauseGuideMusic();
@@ -845,11 +859,12 @@ class _MinisIndependentCaptureScreenState
       _toast('Could not load selected music.');
       return true;
     }
-    final segment = MinisMusicSegment(
+    var segment = MinisMusicSegment(
       path: selection.path,
       startMs: math.max(0, selection.startMs),
       endMs: math.max(selection.startMs, selection.endMs),
     );
+    segment = await _persistMusicSegment(segment);
     setState(() => _musicSegment = segment);
     await _prepareGuideMusic();
     _toast('Music ready - long-press Sounds to clear');
@@ -913,6 +928,7 @@ class _MinisIndependentCaptureScreenState
       );
       if (!mounted) return;
       if (segment == null) return;
+      segment = await _persistMusicSegment(segment);
       setState(() => _musicSegment = segment);
       await _prepareGuideMusic();
       _toast('Music ready - long-press Sounds to clear');

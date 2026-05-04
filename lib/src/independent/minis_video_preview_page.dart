@@ -337,27 +337,57 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     _currentIndex = (_currentIndex + 1) % _paths.length;
     _path = _paths[_currentIndex];
 
-    _controller?.removeListener(_onVideoTick);
-    await _controller?.pause();
-    await _controller?.dispose();
-    _controller = null;
+    // Keep old controller paused so its last frame stays on screen (no black
+    // flash). The new controller is initialized in the background and swapped
+    // in atomically once ready.
+    final oldC = _controller;
+    oldC?.removeListener(_onVideoTick);
+    await oldC?.pause();
 
     if (!mounted) {
       _isAdvancing = false;
+      unawaited(oldC?.dispose().catchError((_) {}));
       return;
     }
 
-    _isSwitchingVideo = true;
-    setState(() {});
-
-    await _bindAndPlay(_path, allowTempFallback: true);
-    if (mounted) {
-      setState(() {
+    try {
+      final nextC = VideoPlayerController.file(
+        File(_path),
+        videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
+      );
+      await nextC.initialize();
+      await nextC.play();
+      if (mounted) {
+        _controller = nextC;
+        nextC.addListener(_onVideoTick);
+        setState(() {
+          _isAdvancing = false;
+          _isSwitchingVideo = false;
+        });
+      } else {
+        await nextC.dispose().catchError((_) {});
+      }
+      unawaited(oldC?.dispose().catchError((_) {}));
+    } catch (_) {
+      // Seamless swap failed (codec/path issue) — fall back to full
+      // _bindAndPlay with temp-copy and H.264 repair support.
+      _controller = null;
+      unawaited(oldC?.dispose().catchError((_) {}));
+      if (!mounted) {
         _isAdvancing = false;
-        _isSwitchingVideo = false;
-      });
-    } else {
-      _isAdvancing = false;
+        return;
+      }
+      _isSwitchingVideo = true;
+      setState(() {});
+      await _bindAndPlay(_path, allowTempFallback: true);
+      if (mounted) {
+        setState(() {
+          _isAdvancing = false;
+          _isSwitchingVideo = false;
+        });
+      } else {
+        _isAdvancing = false;
+      }
     }
   }
 
@@ -448,6 +478,17 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       await oldC?.pause();
       await oldC?.dispose();
       if (!mounted) return;
+
+      // Multi-clip: total duration was already computed during the preview
+      // session (probeAllClips / initialTotalDurationMs). Skip expensive
+      // file probes — the user just saw the video play to the right length.
+      if (_isMultiClip && ms > 0) {
+        Navigator.of(context, rootNavigator: true)
+            .pop<MinisVideoPreviewResult>(
+          MinisVideoPreviewResult(path: pathForResult, durationMs: ms),
+        );
+        return;
+      }
 
       try {
         if (ms >= 3000) {
@@ -798,6 +839,74 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                                 ),
                               ),
                             ),
+                            if (_isReady && c != null)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 8,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      _formatDuration(_currentPos),
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    Expanded(
+                                      child: SliderTheme(
+                                        data: SliderTheme.of(context).copyWith(
+                                          trackHeight: 2,
+                                          thumbShape:
+                                              const RoundSliderThumbShape(
+                                            enabledThumbRadius: 6,
+                                          ),
+                                          overlayShape:
+                                              const RoundSliderOverlayShape(
+                                            overlayRadius: 12,
+                                          ),
+                                          activeTrackColor: Colors.white,
+                                          inactiveTrackColor: Colors.white24,
+                                          thumbColor: Colors.white,
+                                          overlayColor: Colors.white24,
+                                        ),
+                                        child: Slider(
+                                          value: _currentPos.inMilliseconds
+                                              .toDouble()
+                                              .clamp(
+                                                  0,
+                                                  _currentDurMs.toDouble()),
+                                          min: 0,
+                                          max: math.max(1, _currentDurMs)
+                                              .toDouble(),
+                                          onChangeStart: (_) {
+                                            _scrubbing = true;
+                                            c.pause();
+                                          },
+                                          onChanged: (v) {
+                                            c.seekTo(Duration(
+                                                milliseconds: v.toInt()));
+                                          },
+                                          onChangeEnd: (_) {
+                                            _scrubbing = false;
+                                            c.play();
+                                            setState(() {});
+                                          },
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      _formatDuration(Duration(
+                                          milliseconds: _currentDurMs)),
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                           ],
                         ),
             ),
