@@ -921,7 +921,7 @@ class _MinisIndependentCaptureScreenState
         return;
       }
       if (!mounted) return;
-      final segment = await showMinisMusicTimingSheet(
+      var segment = await showMinisMusicTimingSheet(
         context,
         audioPath: path,
         sessionCapMs: _sessionCapMs,
