@@ -28,6 +28,7 @@ bool minisMulticlipMergeSupported() {
 /// for hardware-accelerated merge with real progress reporting.
 ///
 /// Returns output path on success, or `null` on cancel / unsupported / error.
+/// Concatenate [clipPaths] with optional audio and speed; shows progress dialog.
 Future<String?> mergeMinisVideoClipsWithDialog({
   required BuildContext context,
   required List<String> clipPaths,
@@ -90,6 +91,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
       musicStartMs: musicStartMs,
       musicEndMs: musicEndMs,
       clipVolume: clipVolume,
+      playbackSpeed: playbackSpeed,
       onProgress: (p) => progressNotifier.value = p,
     ).then((result) {
       if (!mergeCompleter!.isCompleted) mergeCompleter.complete(result);
@@ -117,6 +119,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
           musicStartMs: musicStartMs,
           musicEndMs: musicEndMs,
           clipVolume: clipVolume,
+          playbackSpeed: playbackSpeed,
         );
 
   progressNotifier.dispose();
@@ -132,6 +135,7 @@ Future<String?> _doNativeMerge({
   int musicStartMs = 0,
   int musicEndMs = 0,
   double clipVolume = 1.0,
+  double playbackSpeed = 1.0,
   void Function(double)? onProgress,
 }) async {
   final result = await RetrytechPlugin.shared.mergeClips(
@@ -142,6 +146,7 @@ Future<String?> _doNativeMerge({
     musicStartMs: musicStartMs,
     musicEndMs: musicEndMs,
     clipVolume: clipVolume,
+    playbackSpeed: playbackSpeed,
     onProgress: onProgress,
   );
   if (result.isEmpty) return null;
@@ -205,6 +210,7 @@ Future<String?> mergeMinisVideoClipsSilent({
       musicStartMs: musicStartMs,
       musicEndMs: musicEndMs,
       clipVolume: clipVolume,
+      playbackSpeed: playbackSpeed,
       onProgress: MinisCaptureHost.hasHandoffOverlay
           ? (p) => MinisCaptureHost.updateHandoffProgress(p)
           : null,
