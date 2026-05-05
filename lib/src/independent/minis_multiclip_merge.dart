@@ -1,19 +1,16 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:pro_video_editor/pro_video_editor.dart';
+import 'package:retrytech_plugin/retrytech_plugin.dart';
 
-import 'package:loopit_minis/src/debug/video_aspect_log.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
-import 'package:video_player/video_player.dart' as vp;
 
 /// Same platforms as [proVideoEditorRenderExportSupported] in hub (no web).
 bool minisMulticlipMergeSupported() {
@@ -23,34 +20,12 @@ bool minisMulticlipMergeSupported() {
       defaultTargetPlatform == TargetPlatform.macOS;
 }
 
-bool _mergeCancelSupported() {
-  if (kIsWeb) return false;
-  return defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS ||
-      defaultTargetPlatform == TargetPlatform.macOS;
-}
 
-/// Probes merged file with video_player (debug) so logs match feed/reel [VideoAspectDiag].
-void _logMergedVideoFileProbe(String outPath) {
-  unawaited(() async {
-    final c = vp.VideoPlayerController.file(File(outPath));
-    try {
-      await c.initialize();
-      logMinisVideoAspectDiag('minis_merge_output', c.value, pathHint: outPath);
-    } catch (e, st) {
-      dev.log('minis merge file probe failed: $e',
-          name: 'VideoAspectDiag', stackTrace: st);
-    } finally {
-      await c.dispose();
-    }
-  }());
-}
 
-/// Concatenate [clipPaths] with [playbackSpeed] and optional audio; shows progress.
+/// Concatenate [clipPaths] with optional audio; shows progress dialog.
 ///
-/// When [backgroundMusic] is set and the file exists, it is mixed in as a
-/// [VideoAudioTrack] (trimmed to [MinisMusicSegment.startMs]/[MinisMusicSegment.endMs]
-/// when provided); clip audio is ducked via [VideoSegment.volume] when mixing.
+/// Uses the native video pipeline (Media3 Transformer / AVFoundation)
+/// for hardware-accelerated merge with real progress reporting.
 ///
 /// Returns output path on success, or `null` on cancel / unsupported / error.
 Future<String?> mergeMinisVideoClipsWithDialog({
@@ -63,10 +38,7 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   if (clipPaths.isEmpty) return null;
   if (!minisMulticlipMergeSupported()) {
     if (context.mounted) {
-      showMinisToast(
-        context,
-        'Merging clips requires Android, iOS, or macOS.',
-      );
+      showMinisToast(context, 'Merging clips requires Android or iOS.');
     }
     return null;
   }
@@ -79,108 +51,121 @@ Future<String?> mergeMinisVideoClipsWithDialog({
     }
   }
 
-  final id = DateTime.now().microsecondsSinceEpoch.toString();
   final dir = await getTemporaryDirectory();
-  final outPath = p.join(dir.path, 'minis_reel_$id.mp4');
+  final outPath = p.join(
+    dir.path,
+    'minis_reel_${DateTime.now().microsecondsSinceEpoch}.mp4',
+  );
 
-  List<VideoAudioTrack> audioTracks = const [];
+  // Background music
+  String? musicPath;
+  int musicStartMs = 0;
+  int musicEndMs = 0;
+  double clipVolume = 1.0;
   final seg = backgroundMusic;
   final music = seg?.path.trim();
   if (music != null && music.isNotEmpty) {
-    final audioFile = File(music);
-    if (!audioFile.existsSync()) {
-      if (context.mounted) {
-        showMinisToast(context, 'Music file not found: $music');
-      }
+    if (!File(music).existsSync()) {
+      if (context.mounted) showMinisToast(context, 'Music file not found.');
     } else {
-      audioTracks = [
-        VideoAudioTrack(
-          path: music,
-          volume: 1.0,
-          loop: true,
-          audioStartTime: Duration(milliseconds: seg!.startMs),
-          audioEndTime: Duration(milliseconds: seg.endMs),
-        ),
-      ];
+      musicPath = music;
+      musicStartMs = seg!.startMs;
+      musicEndMs = seg.endMs;
+      clipVolume = enableAudio ? 0.15 : 0.0;
     }
   }
 
-  final duckClipAudio = audioTracks.isNotEmpty;
-  final clipVolume = duckClipAudio ? (enableAudio ? 0.15 : 0.0) : null;
+  final progressNotifier = ValueNotifier<double>(0.0);
+  Completer<String?>? mergeCompleter;
 
-  // Use the same quality path as hub export: plain [VideoRenderData] omits
-  // [qualityConfig]/bitrate and the encoder can fall back to a much lower
-  // output than the camera-captured clips.
-  // Explicit 1:1 scale skips [VideoRenderData.toAsyncMap]'s metadata-driven
-  // fit (getMetadata on first segment). That probe can throw METADATA_ERROR
-  // / setDataSource failures for some temp or gallery paths while export
-  // would still succeed with fixed scales + quality bitrate.
-  final data = VideoRenderData.withQualityPreset(
-    id: id,
-    videoSegments: clipPaths
-        .map(
-          (path) => VideoSegment(
-            video: EditorVideo.file(File(path)),
-            volume: clipVolume,
-          ),
-        )
-        .toList(),
-    qualityPreset: VideoQualityPreset.p1080High,
-    outputFormat: VideoOutputFormat.mp4,
-    playbackSpeed: playbackSpeed,
-    enableAudio: enableAudio,
-    audioTracks: audioTracks,
-    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
-  );
+  if (context.mounted) {
+    mergeCompleter = Completer<String?>();
 
-  final future = ProVideoEditor.instance.renderVideoToFile(outPath, data);
-  if (!context.mounted) {
-    unawaited(
-      future.then<void>(
-        (_) {},
-        onError: (_, __) {},
+    // Start merge in background
+    unawaited(_doNativeMerge(
+      clipPaths: clipPaths,
+      outPath: outPath,
+      enableAudio: enableAudio,
+      musicPath: musicPath,
+      musicStartMs: musicStartMs,
+      musicEndMs: musicEndMs,
+      clipVolume: clipVolume,
+      onProgress: (p) => progressNotifier.value = p,
+    ).then((result) {
+      if (!mergeCompleter!.isCompleted) mergeCompleter.complete(result);
+    }).catchError((e) {
+      if (!mergeCompleter!.isCompleted) mergeCompleter.complete(null);
+    }));
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _MinisClipMergeProgressDialog(
+        progressNotifier: progressNotifier,
+        mergeFuture: mergeCompleter!.future,
       ),
     );
-    return null;
   }
 
-  await showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (dialogCtx) => _MinisClipMergeProgressDialog(
-      taskId: data.id,
-      renderFuture: future,
-      canCancel: _mergeCancelSupported(),
-      onCancel: () => ProVideoEditor.instance.cancel(data.id),
-    ),
-  );
+  final result = mergeCompleter != null
+      ? await mergeCompleter.future
+      : await _doNativeMerge(
+          clipPaths: clipPaths,
+          outPath: outPath,
+          enableAudio: enableAudio,
+          musicPath: musicPath,
+          musicStartMs: musicStartMs,
+          musicEndMs: musicEndMs,
+          clipVolume: clipVolume,
+        );
 
-  try {
-    await future;
-
-    final outFile = File(outPath);
-    if (!outFile.existsSync() || outFile.lengthSync() == 0) {
-      debugPrint('[mergeMinisVideoClipsWithDialog] output missing or empty');
-      return null;
-    }
-
-    _logMergedVideoFileProbe(outPath);
-    return outPath;
-  } on RenderCanceledException {
-    return null;
-  } catch (_) {
-    rethrow;
-  }
+  progressNotifier.dispose();
+  return result;
 }
-/// Silent merge — no dialog. Use this when the caller already shows its own
+
+/// Shared native merge call.
+Future<String?> _doNativeMerge({
+  required List<String> clipPaths,
+  required String outPath,
+  required bool enableAudio,
+  String? musicPath,
+  int musicStartMs = 0,
+  int musicEndMs = 0,
+  double clipVolume = 1.0,
+  void Function(double)? onProgress,
+}) async {
+  final result = await RetrytechPlugin.shared.mergeClips(
+    clipPaths: clipPaths,
+    outputPath: outPath,
+    enableAudio: enableAudio,
+    musicPath: musicPath,
+    musicStartMs: musicStartMs,
+    musicEndMs: musicEndMs,
+    clipVolume: clipVolume,
+    onProgress: onProgress,
+  );
+  if (result.isEmpty) return null;
+
+  final outFile = File(result);
+  if (!outFile.existsSync() || outFile.lengthSync() == 0) {
+    debugPrint('[mergeMinisVideoClips] output missing or empty');
+    return null;
+  }
+  return result;
+}
+/// Silent merge -- no dialog. Use this when the caller already shows its own
 /// loading overlay (e.g. LoopIt's runWithMinisHandoffOverlay).
+///
+/// [qualityPreset] is accepted for API compatibility but ignored -- the native
+/// pipeline always uses the device hardware encoder at source resolution.
+///
 /// Returns output path on success, or `null` on error.
 Future<String?> mergeMinisVideoClipsSilent({
   required List<String> clipPaths,
   required double playbackSpeed,
   required bool enableAudio,
   MinisMusicSegment? backgroundMusic,
-  VideoQualityPreset qualityPreset = VideoQualityPreset.p1080High,
+  dynamic qualityPreset,
 }) async {
   if (clipPaths.isEmpty) return null;
   if (!minisMulticlipMergeSupported()) return null;
@@ -188,76 +173,44 @@ Future<String?> mergeMinisVideoClipsSilent({
     if (!File(path).existsSync()) return null;
   }
 
-  final id = DateTime.now().microsecondsSinceEpoch.toString();
   final dir = await getTemporaryDirectory();
-  final outPath = p.join(dir.path, 'minis_reel_$id.mp4');
-
-  List<VideoAudioTrack> audioTracks = const [];
-  final seg = backgroundMusic;
-  final music = seg?.path.trim();
-  if (music != null && music.isNotEmpty && !File(music).existsSync()) {
-    debugPrint('[mergeMinisVideoClipsSilent] WARNING: music file missing: $music');
-  }
-  if (music != null && music.isNotEmpty && File(music).existsSync()) {
-    audioTracks = [
-      VideoAudioTrack(
-        path: music,
-        volume: 1.0,
-        loop: true,
-        audioStartTime: Duration(milliseconds: seg!.startMs),
-        audioEndTime: Duration(milliseconds: seg.endMs),
-      ),
-    ];
-  }
-
-  final duckClipAudio = audioTracks.isNotEmpty;
-  final clipVolume = duckClipAudio ? (enableAudio ? 0.15 : 0.0) : null;
-
-  final data = VideoRenderData.withQualityPreset(
-    id: id,
-    videoSegments: clipPaths
-        .map((path) => VideoSegment(
-              video: EditorVideo.file(File(path)),
-              volume: clipVolume,
-            ))
-        .toList(),
-    qualityPreset: qualityPreset,
-    outputFormat: VideoOutputFormat.mp4,
-    playbackSpeed: playbackSpeed,
-    enableAudio: enableAudio,
-    audioTracks: audioTracks,
-    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
+  final outPath = p.join(
+    dir.path,
+    'minis_reel_${DateTime.now().microsecondsSinceEpoch}.mp4',
   );
 
-  StreamSubscription? progressSub;
-  if (MinisCaptureHost.hasHandoffOverlay) {
-    progressSub = ProVideoEditor.instance.progressStreamById(id).listen((snap) {
-      MinisCaptureHost.updateHandoffProgress(snap.progress);
-    });
+  String? musicPath;
+  int musicStartMs = 0;
+  int musicEndMs = 0;
+  double clipVolume = 1.0;
+  final seg = backgroundMusic;
+  final music = seg?.path.trim();
+  if (music != null && music.isNotEmpty) {
+    if (!File(music).existsSync()) {
+      debugPrint('[mergeMinisVideoClipsSilent] WARNING: music file missing: $music');
+    } else {
+      musicPath = music;
+      musicStartMs = seg!.startMs;
+      musicEndMs = seg.endMs;
+      clipVolume = enableAudio ? 0.15 : 0.0;
+    }
   }
 
   try {
-    await ProVideoEditor.instance.renderVideoToFile(outPath, data);
-    await progressSub?.cancel();
-
-    // Validate output — ProVideoEditor can return without error but leave
-    // a zero-byte or missing file when FFmpeg fails silently.
-    final outFile = File(outPath);
-    if (!outFile.existsSync() || outFile.lengthSync() == 0) {
-      debugPrint('[mergeMinisVideoClipsSilent] output missing or empty: $outPath');
-      if (MinisCaptureHost.hasHandoffOverlay) {
-        MinisCaptureHost.reportHandoffError('Merge produced an empty file.');
-      }
-      return null;
-    }
-
-    _logMergedVideoFileProbe(outPath);
-    return outPath;
-  } on RenderCanceledException {
-    await progressSub?.cancel();
-    return null;
+    final result = await _doNativeMerge(
+      clipPaths: clipPaths,
+      outPath: outPath,
+      enableAudio: enableAudio,
+      musicPath: musicPath,
+      musicStartMs: musicStartMs,
+      musicEndMs: musicEndMs,
+      clipVolume: clipVolume,
+      onProgress: MinisCaptureHost.hasHandoffOverlay
+          ? (p) => MinisCaptureHost.updateHandoffProgress(p)
+          : null,
+    );
+    return result;
   } catch (e) {
-    await progressSub?.cancel();
     if (MinisCaptureHost.hasHandoffOverlay) {
       MinisCaptureHost.reportHandoffError(minisUserFriendlyException(e));
     }
@@ -268,16 +221,12 @@ Future<String?> mergeMinisVideoClipsSilent({
 
 class _MinisClipMergeProgressDialog extends StatefulWidget {
   const _MinisClipMergeProgressDialog({
-    required this.taskId,
-    required this.renderFuture,
-    required this.canCancel,
-    required this.onCancel,
+    required this.progressNotifier,
+    required this.mergeFuture,
   });
 
-  final String taskId;
-  final Future<void> renderFuture;
-  final bool canCancel;
-  final Future<void> Function() onCancel;
+  final ValueNotifier<double> progressNotifier;
+  final Future<String?> mergeFuture;
 
   @override
   State<_MinisClipMergeProgressDialog> createState() =>
@@ -286,37 +235,12 @@ class _MinisClipMergeProgressDialog extends StatefulWidget {
 
 class _MinisClipMergeProgressDialogState
     extends State<_MinisClipMergeProgressDialog> {
-  double _simulatedProgress = 0.0;
-  Timer? _simTimer;
-
   @override
   void initState() {
     super.initState();
-    // Native FFmpeg often stalls at 0% when duration metadata is missing.
-    // Simulate progress up to 92% over ~45 seconds so the UI isn't dead.
-    _simTimer = Timer.periodic(const Duration(milliseconds: 500), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
-      setState(() {
-        if (_simulatedProgress < 0.92) {
-          // Slows down as it gets closer to 90%
-          _simulatedProgress += 0.01 * (1.0 - _simulatedProgress);
-        }
-      });
-    });
-
-    widget.renderFuture.whenComplete(() {
-      _simTimer?.cancel();
+    widget.mergeFuture.whenComplete(() {
       if (mounted) Navigator.of(context).pop();
     });
-  }
-
-  @override
-  void dispose() {
-    _simTimer?.cancel();
-    super.dispose();
   }
 
   @override
@@ -327,19 +251,9 @@ class _MinisClipMergeProgressDialogState
         'Merging clips',
         style: TextStyle(color: Colors.white),
       ),
-      content: StreamBuilder<ProgressModel>(
-        stream: ProVideoEditor.instance.progressStreamById(widget.taskId),
-        builder: (context, snap) {
-          double? nativeProgress = snap.data?.progress;
-
-          if (nativeProgress != null && nativeProgress > 0.01) {
-            // Native stream is working correctly, stop simulation.
-            _simTimer?.cancel();
-          } else {
-            // Use simulation if native is stuck at 0 or null.
-            nativeProgress = _simulatedProgress;
-          }
-
+      content: ValueListenableBuilder<double>(
+        valueListenable: widget.progressNotifier,
+        builder: (context, progress, _) {
           return Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -351,13 +265,13 @@ class _MinisClipMergeProgressDialogState
                   alignment: Alignment.center,
                   children: [
                     CircularProgressIndicator(
-                      value: nativeProgress,
+                      value: progress,
                       strokeWidth: 4,
                       color: Colors.white,
                       backgroundColor: Colors.white24,
                     ),
                     Text(
-                      '${(nativeProgress * 100).toInt()}%',
+                      '${(progress * 100).toInt()}%',
                       style: const TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.bold,
@@ -376,19 +290,7 @@ class _MinisClipMergeProgressDialogState
           );
         },
       ),
-      actions: [
-        if (widget.canCancel)
-          TextButton(
-            onPressed: () {
-              _simTimer?.cancel();
-              widget.onCancel();
-            },
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: Colors.white54),
-            ),
-          ),
-      ],
+      actions: const [],
     );
   }
 }

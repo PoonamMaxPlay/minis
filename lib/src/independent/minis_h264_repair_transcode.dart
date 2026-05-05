@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:pro_video_editor/pro_video_editor.dart';
+import 'package:retrytech_plugin/retrytech_plugin.dart';
 
 /// Re-encodes to a broadly ExoPlayer-safe MP4 (H.264 + 720p) when the source
 /// cannot be decoded in-preview or in [Trimmer].
@@ -33,23 +33,17 @@ Future<String?> minisTranscodeToH264ForDevicePlayback(
       'minis_h264_${DateTime.now().microsecondsSinceEpoch}.mp4',
     );
 
-    final data = VideoRenderData.withQualityPreset(
-      videoSegments: [
-        VideoSegment(video: EditorVideo.file(File(inputPath))),
-      ],
-      qualityPreset: VideoQualityPreset.p720High,
-      outputFormat: VideoOutputFormat.mp4,
-      enableAudio: true,
-      transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
+    final result = await RetrytechPlugin.shared.transcodeToH264(
+      inputPath: inputPath,
+      outputPath: outPath,
     );
+    if (result.isEmpty) return null;
 
-    await ProVideoEditor.instance.renderVideoToFile(outPath, data);
-
-    final outFile = File(outPath);
+    final outFile = File(result);
     if (!await outFile.exists() || await outFile.length() < 1024) {
       return null;
     }
-    return outPath;
+    return result;
   } catch (e, st) {
     debugPrint('minisH264Repair: failed for $inputPath: $e\n$st');
     return null;
