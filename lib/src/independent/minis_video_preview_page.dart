@@ -138,11 +138,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     return ratio;
   }
 
-  bool _isPathImage(String path) {
-    final ext = p.extension(path).toLowerCase();
-    return ext == '.jpg' || ext == '.jpeg' || ext == '.png' || ext == '.webp';
-  }
-
   /// When set, preview reads this file; delete on dispose (not the handoff [_path]).
   String? _tempDecodePath;
 

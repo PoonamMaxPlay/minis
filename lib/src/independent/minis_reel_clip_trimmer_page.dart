@@ -83,6 +83,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
   double _startMs = 0;
   double _endMs = 0;
   double _totalMs = 0;
+  double _maxSegMs = 30000;
   bool _isPlaying = false;
   bool _loadFailed = false;
   bool _videoLoaded = false;
@@ -128,6 +129,17 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
 
   Future<void> _loadVideo() async {
     try {
+      // Probe native duration first — it is faster and more reliable than
+      // waiting for VideoPlayerController to report duration.
+      int nativeDurationMs = 0;
+      try {
+        nativeDurationMs = await RetrytechPlugin.shared.getVideoDurationMs(
+          _activeVideoFile.path,
+        );
+      } catch (e) {
+        debugPrint('minis trimmer native probe: $e');
+      }
+
       _controller?.dispose();
       final ctrl = VideoPlayerController.file(_activeVideoFile);
       _controller = ctrl;
@@ -137,25 +149,27 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         await _failLoadOrReencode();
         return;
       }
-      await minisWaitForVideoControllerDuration(ctrl);
+
+      // Short wait for controller duration (reduced from 6s to 3s since we
+      // already have the native probe as fallback).
+      await minisWaitForVideoControllerDuration(
+        ctrl,
+        timeout: const Duration(seconds: 3),
+      );
       if (!mounted) return;
+
       var total = ctrl.value.duration.inMilliseconds;
-      if (total <= 0) {
-        // Fallback: use native duration probe
-        total = await RetrytechPlugin.shared.getVideoDurationMs(
-          _activeVideoFile.path,
-        );
-      }
+      if (total <= 0) total = nativeDurationMs;
       if (total <= 0) {
         await _failLoadOrReencode();
         return;
       }
       final capReq = widget.maxOutputDuration?.inMilliseconds ?? 30000;
-      final maxSegMs = math.min(capReq, total);
+      _maxSegMs = math.min(capReq, total).toDouble();
       setState(() {
         _totalMs = total.toDouble();
         _startMs = 0;
-        _endMs = math.min(total.toDouble(), maxSegMs.toDouble());
+        _endMs = math.min(total.toDouble(), _maxSegMs);
         _videoLoaded = true;
       });
     } catch (e) {
@@ -407,8 +421,19 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                           values: RangeValues(_startMs, _endMs),
                           onChanged: (v) {
                             setState(() {
-                              _startMs = v.start;
-                              _endMs = v.end;
+                              var s = v.start;
+                              var e = v.end;
+                              // Enforce maxOutputDuration budget
+                              if (e - s > _maxSegMs) {
+                                // Keep whichever handle the user is NOT dragging
+                                if ((s - _startMs).abs() > (e - _endMs).abs()) {
+                                  s = e - _maxSegMs;
+                                } else {
+                                  e = s + _maxSegMs;
+                                }
+                              }
+                              _startMs = s.clamp(0, _totalMs);
+                              _endMs = e.clamp(0, _totalMs);
                             });
                           },
                           onChangeEnd: (v) {
