@@ -6,6 +6,7 @@ import 'package:audio_waveforms/audio_waveforms.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
@@ -17,7 +18,6 @@ import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
 import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
 import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
-import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_multiclip_merge.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
@@ -28,8 +28,6 @@ import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
 import 'package:loopit_minis/src/minis_handoff.dart';
-import 'package:loopit_minis/src/native_video_trim_user_message.dart'
-    show logVideoTrimDiagnostic, messageForVideoTrimFailure;
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
@@ -267,6 +265,31 @@ class _MinisIndependentCaptureScreenState
       _ownEngine = true;
     }
     unawaited(_boot());
+    unawaited(_manageAudioSession(true));
+  }
+
+  Future<void> _manageAudioSession(bool active) async {
+    try {
+      final session = await AudioSession.instance;
+      if (active) {
+        await session.configure(const AudioSessionConfiguration(
+          avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+          avAudioSessionCategoryOptions:
+              AVAudioSessionCategoryOptions.duckOthers,
+          avAudioSessionMode: AVAudioSessionMode.videoRecording,
+          androidAudioAttributes: AndroidAudioAttributes(
+            contentType: AndroidAudioContentType.music,
+            usage: AndroidAudioUsage.media,
+          ),
+          androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        ));
+        await session.setActive(true);
+      } else {
+        await session.setActive(false);
+      }
+    } catch (e) {
+      debugPrint('MINIS: AudioSession error: $e');
+    }
   }
 
   Future<void> _boot() async {
@@ -388,7 +411,6 @@ class _MinisIndependentCaptureScreenState
   }
 
   Future<void> _showPhotoBlockedByReelSheet() async {
-    final mergeSupported = minisMulticlipMergeSupported();
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF1C1C1E),
@@ -404,7 +426,7 @@ class _MinisIndependentCaptureScreenState
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 const Text(
-                  'Photos and video clips',
+                  'Video clip recorded',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 18,
@@ -413,9 +435,7 @@ class _MinisIndependentCaptureScreenState
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  mergeSupported
-                      ? 'You already have video clips in this mini. Merge your minis, remove the last clip, or keep recording video.'
-                      : 'You already have video clips. Remove the last clip or keep recording video.',
+                  'You already have a video clip. Tap Next (✓) to continue, or remove the clip to take a photo.',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.78),
                     fontSize: 14,
@@ -423,22 +443,20 @@ class _MinisIndependentCaptureScreenState
                   ),
                 ),
                 const SizedBox(height: 20),
-                if (mergeSupported) ...[
-                  FilledButton(
-                    onPressed: () {
-                      Navigator.pop(ctx);
-                      unawaited(_confirmClip());
-                    },
-                    child: const Text('Merge minis'),
-                  ),
-                  const SizedBox(height: 10),
-                ],
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    unawaited(_confirmClip());
+                  },
+                  child: const Text('Next'),
+                ),
+                const SizedBox(height: 10),
                 OutlinedButton(
                   onPressed: () {
                     Navigator.pop(ctx);
                     unawaited(_deleteLastVideoClip());
                   },
-                  child: const Text('Remove last clip'),
+                  child: const Text('Remove clip'),
                 ),
                 const SizedBox(height: 8),
                 TextButton(
@@ -486,7 +504,8 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _clipElapsedTicker?.cancel();
     _zoomBadgeTimer?.cancel();
-    unawaited(_disposeGuideMusic());
+    unawaited(_manageAudioSession(false));
+    unawaited(_disposeGuideMusic().catchError((_) {}));
     if (_ownEngine) {
       unawaited(_engine?.dispose());
     }
@@ -709,13 +728,6 @@ class _MinisIndependentCaptureScreenState
     return DateTime.now().difference(_activeClipStartedAt!).inMilliseconds;
   }
 
-  int get _remainingSessionMs {
-    return math.max(
-      0,
-      _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs,
-    );
-  }
-
   double get _recordRingProgress {
     final cap = math.max(1, _sessionCapMs);
     final used = (_clipsTotalDurationMs + (_recording ? _liveClipElapsedMs : 0))
@@ -723,18 +735,17 @@ class _MinisIndependentCaptureScreenState
     return used / cap;
   }
 
-  /// m:ss used / m:ss cap · clip count (always visible when reel has content).
+  /// Duration label shown above the shutter.
   String get _reelTimePrimaryLine {
     final capMs = _sessionCapMs;
     final cap = minisFormatClipDurationLabel(capMs);
     if (_videoClips.isEmpty && !_recording) {
-      return 'Minis max $cap';
+      return 'Max $cap';
     }
     final usedMs =
         _clipsTotalDurationMs + (_recording ? _liveClipElapsedMs : 0);
     final used = minisFormatClipDurationLabel(usedMs);
-    final n = _videoClips.length;
-    return '$used / $cap · $n clip${n == 1 ? '' : 's'}';
+    return '$used / $cap';
   }
 
   bool get _canConfirmClip =>
@@ -839,15 +850,30 @@ class _MinisIndependentCaptureScreenState
       _toast('Could not load selected music.');
       return true;
     }
-    final segment = MinisMusicSegment(
+    var segment = MinisMusicSegment(
       path: selection.path,
       startMs: math.max(0, selection.startMs),
       endMs: math.max(selection.startMs, selection.endMs),
     );
+    segment = await _persistMusicSegment(segment);
     setState(() => _musicSegment = segment);
     await _prepareGuideMusic();
     _toast('Music ready - long-press Sounds to clear');
     return true;
+  }
+
+  /// Copy a picker/temp music file to durable app storage so it survives
+  /// until the background merge runs (picker temps are cleaned aggressively).
+  Future<MinisMusicSegment> _persistMusicSegment(MinisMusicSegment seg) async {
+    final src = File(seg.path);
+    if (!await src.exists()) return seg;
+    final dir = await getApplicationDocumentsDirectory();
+    final musicDir = Directory(p.join(dir.path, 'minis_music'));
+    if (!await musicDir.exists()) await musicDir.create(recursive: true);
+    final ext = p.extension(seg.path).isNotEmpty ? p.extension(seg.path) : '.m4a';
+    final dest = p.join(musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext');
+    await src.copy(dest);
+    return MinisMusicSegment(path: dest, startMs: seg.startMs, endMs: seg.endMs);
   }
 
   Future<void> _pickMusic() async {
@@ -861,7 +887,7 @@ class _MinisIndependentCaptureScreenState
           existing != null &&
           await File(existing.path).exists()) {
         if (!mounted) return;
-        final segment = await showMinisMusicTimingSheet(
+        var segment = await showMinisMusicTimingSheet(
           context,
           audioPath: existing.path,
           sessionCapMs: _sessionCapMs,
@@ -869,6 +895,7 @@ class _MinisIndependentCaptureScreenState
         );
         if (!mounted) return;
         if (segment == null) return;
+        segment = await _persistMusicSegment(segment);
         setState(() => _musicSegment = segment);
         await _prepareGuideMusic();
         _toast('Music section updated - long-press Sounds to clear');
@@ -900,13 +927,14 @@ class _MinisIndependentCaptureScreenState
         return;
       }
       if (!mounted) return;
-      final segment = await showMinisMusicTimingSheet(
+      var segment = await showMinisMusicTimingSheet(
         context,
         audioPath: path,
         sessionCapMs: _sessionCapMs,
       );
       if (!mounted) return;
       if (segment == null) return;
+      segment = await _persistMusicSegment(segment);
       setState(() => _musicSegment = segment);
       await _prepareGuideMusic();
       _toast('Music ready - long-press Sounds to clear');
@@ -923,8 +951,8 @@ class _MinisIndependentCaptureScreenState
     // the user recorded. Block once the reel has content and explain why.
     if (_videoClips.isNotEmpty) {
       _toast(
-        'Speed cannot be changed once clips are recorded. '
-        'Remove all clips to pick a different speed.',
+        'Speed cannot be changed after recording. '
+        'Remove the clip to pick a different speed.',
       );
       return;
     }
@@ -1585,78 +1613,6 @@ class _MinisIndependentCaptureScreenState
     _toast('Removed last clip');
   }
 
-  /// Trim one segment (same stack as merged-reel trim). Closes any open sheet first.
-  Future<void> _trimClipAtIndex(int index) async {
-    if (!minisReelClipTrimmerPlatformSupported()) {
-      _toast('Trim works on Android and iOS.');
-      return;
-    }
-    if (index < 0 || index >= _videoClips.length) return;
-    if (_busy || _recording || _countingDown) return;
-    final clip = _videoClips[index];
-    final file = File(clip.path);
-    if (!await file.exists()) {
-      _toast('Clip file missing.');
-      return;
-    }
-    _applyBusy(true, message: 'Opening trim…');
-    MinisReelTrimResult? result;
-    try {
-      result = await MinisReelClipTrimmerPage.open(context, file);
-    } finally {
-      if (mounted) {
-        _applyBusy(false);
-      }
-    }
-    if (!mounted || result == null || result.path.isEmpty) return;
-    try {
-      // Trimmer span + file finalize (same ~1s probe issue as append).
-      final newMs =
-          await minisFinalizeClipDurationMs(result.durationMs, result.path);
-      final delta = newMs - clip.durationMs;
-      if (_clipsTotalDurationMs + delta > _sessionCapMs) {
-        _toast("Trimmed clip no longer fits this mini's time cap.");
-        try {
-          await File(result.path).delete();
-        } catch (_) {}
-        return;
-      }
-      final thumb = await _thumbnailForVideoPath(result.path, newMs);
-      if (!mounted) return;
-      final oldPath = clip.path;
-      final outPath = result.path;
-      setState(() {
-        _clipsTotalDurationMs += delta;
-        _videoClips[index] = MinisRecordingClip(
-          id: clip.id,
-          path: outPath,
-          durationMs: newMs,
-          thumbnailBytes: thumb,
-        );
-      });
-      if (oldPath != outPath) {
-        try {
-          await File(oldPath).delete();
-        } catch (_) {}
-      }
-      _toast('Clip ${index + 1} trimmed');
-    } catch (e, st) {
-      logVideoTrimDiagnostic(
-        e,
-        stackTrace: st,
-        context: 'MinisCapture._trimClipAtIndex',
-        extra: {
-          'clipIndex': index,
-          'sourceFile': p.basename(clip.path),
-          'resultPath': p.basename(result.path),
-        },
-      );
-      _toast(messageForVideoTrimFailure(e));
-      try {
-        await File(result.path).delete();
-      } catch (_) {}
-    }
-  }
 
   /// [previewDurationMs]: when the clip was just confirmed from [MinisVideoPreviewPage],
   /// pass the player-reported duration (avoids repeated ~1s file probes on MP4s).
@@ -1745,196 +1701,6 @@ class _MinisIndependentCaptureScreenState
     }
   }
 
-  void _showMultiClipReviewSheet() {
-    if (_videoClips.isEmpty) return;
-
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF1C1C1E),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetCtx) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final listHeight = math.min(
-              420.0,
-              88.0 * _videoClips.length + 16,
-            );
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Multi-clip',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${_videoClips.length} segment${_videoClips.length == 1 ? '' : 's'}. '
-                      'Drag the handle to reorder merge order. Trim edits one file. '
-                      'Use gallery (images) below to add from the library; undo removes the last clip.',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.75),
-                        fontSize: 14,
-                        height: 1.35,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      height: listHeight,
-                      child: Theme(
-                        data: Theme.of(context).copyWith(
-                          canvasColor: const Color(0xFF1C1C1E),
-                        ),
-                        child: ReorderableListView.builder(
-                          buildDefaultDragHandles: false,
-                          itemCount: _videoClips.length,
-                          onReorder: (oldIndex, newIndex) {
-                            setState(() {
-                              var n = newIndex;
-                              if (n > oldIndex) n -= 1;
-                              final c = _videoClips.removeAt(oldIndex);
-                              _videoClips.insert(n, c);
-                            });
-                            setModalState(() {});
-                          },
-                          itemBuilder: (context, index) {
-                            final clip = _videoClips[index];
-                            final bytes = clip.thumbnailBytes;
-                            final durLabel =
-                                minisFormatClipDurationLabel(clip.durationMs);
-                            final trimSupported =
-                                minisReelClipTrimmerPlatformSupported();
-                            return Padding(
-                              key: ValueKey<int>(clip.id),
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: Material(
-                                color: Colors.white.withValues(alpha: 0.08),
-                                borderRadius: BorderRadius.circular(12),
-                                child: ListTile(
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 4,
-                                  ),
-                                  leading: ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: SizedBox(
-                                      width: 56,
-                                      height: 56,
-                                      child: bytes != null
-                                          ? Image.memory(
-                                              bytes,
-                                              fit: BoxFit.cover,
-                                            )
-                                          : ColoredBox(
-                                              color: Colors.white.withValues(
-                                                alpha: 0.12,
-                                              ),
-                                              child: const Center(
-                                                child: PhosphorIcon(
-                                                  PhosphorIconsRegular
-                                                      .videoCamera,
-                                                  color: Colors.white54,
-                                                  size: 24,
-                                                ),
-                                              ),
-                                            ),
-                                    ),
-                                  ),
-                                  title: Text(
-                                    'Clip ${index + 1} · $durLabel',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 15,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    trimSupported
-                                        ? 'Merge order: ${index + 1} of ${_videoClips.length}'
-                                        : 'Reorder for merge · trim on device',
-                                    style: TextStyle(
-                                      color:
-                                          Colors.white.withValues(alpha: 0.55),
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      TextButton(
-                                        onPressed: (_busy ||
-                                                _recording ||
-                                                _countingDown ||
-                                                !trimSupported)
-                                            ? null
-                                            : () async {
-                                                Navigator.of(sheetCtx).pop();
-                                                await _trimClipAtIndex(index);
-                                                if (mounted &&
-                                                    _videoClips.isNotEmpty) {
-                                                  _showMultiClipReviewSheet();
-                                                }
-                                              },
-                                        child: Text(
-                                          'Trim',
-                                          style: TextStyle(
-                                            color: trimSupported
-                                                ? const Color(0xFF7DD3FC)
-                                                : Colors.white38,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                      ),
-                                      ReorderableDragStartListener(
-                                        index: index,
-                                        child: const Padding(
-                                          padding: EdgeInsets.all(8),
-                                          child: Icon(
-                                            Icons.drag_handle,
-                                            color: Colors.white54,
-                                            size: 28,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
 
   Future<void> _openGallery() async {
     _logMulticlipState('_openGallery enter');
@@ -1948,6 +1714,11 @@ class _MinisIndependentCaptureScreenState
       _logMulticlip(
         '_openGallery SKIP: busy=$_busy recording=$_recording countingDown=$_countingDown',
       );
+      return;
+    }
+    // Single-clip mode: block gallery when a clip is already recorded.
+    if (_videoClips.isNotEmpty) {
+      _toast('Tap ✓ to use this clip, or ↩ to remove it first.');
       return;
     }
     if (kIsWeb) {
@@ -2058,132 +1829,86 @@ class _MinisIndependentCaptureScreenState
     if (_videoClips.isNotEmpty) {
       if (_busy || _recording || _countingDown) return;
 
-      // STRICT PREVIEW: ALL CLIPS PASSTHROUGH (INSTANT)
       final rawPaths = _videoClips.map((c) => c.path).toList();
+      final hasMultipleClips = _videoClips.length > 1;
+      final speed = _speedSteps[_speedIndex];
+      final hasSpeed = speed != 1.0;
+      final hasMusic = _musicSegment != null;
+      final isMuted = !_micEnabled;
+
+      String pathForPreview = rawPaths.first;
+      int durationForPreview = _clipsTotalDurationMs;
+
+      // If we need any processing (merge, speed, music, or mute), do it NOW
+      // so the preview screen shows the final result.
+      if (hasMultipleClips || hasSpeed || hasMusic || isMuted) {
+        if (!minisMulticlipMergeSupported()) {
+          _toast('Merging/Mixing requires Android, iOS, or macOS.');
+          return;
+        }
+        _applyBusy(true, message: 'Preparing preview…');
+        try {
+          final merged = await mergeMinisVideoClipsWithDialog(
+            context: context,
+            clipPaths: rawPaths,
+            playbackSpeed: speed,
+            enableAudio: _micEnabled,
+            backgroundMusic: _musicSegment,
+          );
+          if (!mounted) return;
+          _applyBusy(false);
+          if (merged == null || merged.isEmpty) return;
+
+          pathForPreview = merged;
+          if (hasSpeed) {
+            durationForPreview = (durationForPreview / speed).round();
+          }
+        } catch (e) {
+          if (mounted) _applyBusy(false);
+          _toast('Processing failed: ${minisUserFriendlyException(e)}');
+          return;
+        }
+      }
+
       final preview = await MinisVideoPreviewPage.open(
         context,
-        rawPaths,
+        [pathForPreview],
         title: 'Preview',
-        confirmLabel: 'Use minis',
-        allowReelTrim:
-            minisReelClipTrimmerPlatformSupported() && rawPaths.length == 1,
+        confirmLabel: 'Next',
+        allowReelTrim: minisReelClipTrimmerPlatformSupported(),
         confirmOnClose: true,
-        initialTotalDurationMs: _clipsTotalDurationMs,
+        initialTotalDurationMs: durationForPreview,
       );
       if (!mounted) return;
       if (preview == null || preview.path.isEmpty) {
         return; // user cancelled preview
       }
-      
-      final postPreviewPath = preview.path;
-      
-      // NOW apply processing ONLY AFTER the user confirmed the preview.
-      final hasMultipleClips = _videoClips.length > 1;
-      final hasSpeedOrMusic = _speedSteps[_speedIndex] != 1.0 || _musicSegment != null;
-      
-      if (hasMultipleClips || hasSpeedOrMusic) {
-        if (!minisMulticlipMergeSupported()) {
-          _toast('Merging/Mixing requires Android, iOS, or macOS.');
-          return;
-        }
-        
-        // Pass the merge task back to the host app!
-        // _deliverConfirmedCapture only accepts String, so we call the host
-        // directly here — Object? is fine for completeCaptureResult.
-        final pathsToMerge = hasMultipleClips ? rawPaths : [postPreviewPath];
-        _videoClips.clear();
-        _clipsTotalDurationMs = 0;
 
-        final mergeRequest = MinisHandoffRequest(
-          action: MinisHandoffAction.mergeRequired,
-          clipPaths: pathsToMerge,
-          playbackSpeed: _speedSteps[_speedIndex],
-          enableAudio: _micEnabled,
-          backgroundMusic: _musicSegment,
-        );
-        MinisCaptureHost.completeCaptureResult(mergeRequest.toMap());
-        if (!mounted) return;
+      // Preview confirmed (possibly trimmed).
+      // Since we already merged/mixed before preview, we just deliver the result.
+      final finalPath = preview.path;
+      _videoClips.clear();
+      _clipsTotalDurationMs = 0;
+
+      // Deliver to host app
+      final request = MinisHandoffRequest(
+        action: MinisHandoffAction.mergeRequired,
+        clipPaths: [finalPath],
+        playbackSpeed: 1.0, // already applied
+        enableAudio: true, // already applied/muted
+        backgroundMusic: null, // already applied
+      );
+      MinisCaptureHost.completeCaptureResult(request.toMap());
+      if (mounted) {
         final nav = Navigator.maybeOf(context, rootNavigator: true);
         if (nav != null && nav.canPop()) nav.pop();
-        return;
-      } else {
-        // No processing needed. Deliver raw!
-        _videoClips.clear();
-        _clipsTotalDurationMs = 0;
-        _deliverConfirmedCapture(postPreviewPath);
-        return;
       }
+      return;
     }
 
-    final path = _lastCapturePath;
-    if (path == null || path.isEmpty) return;
-
-    if (_lastCaptureIsVideo) {
-      final seg = _musicSegment;
-      final hasMusic = seg != null && File(seg.path).existsSync();
-      if (hasMusic) {
-        if (!minisMulticlipMergeSupported()) {
-          _toast('Mixing music requires Android, iOS, or macOS.');
-        } else {
-          _applyBusy(true, message: 'Mixing audio…');
-          try {
-            final merged = await mergeMinisVideoClipsWithDialog(
-              context: context,
-              clipPaths: [path],
-              playbackSpeed: _speedSteps[_speedIndex],
-              enableAudio: _micEnabled,
-              backgroundMusic: seg,
-            );
-            if (!mounted) return;
-            if (merged == null || merged.isEmpty) {
-              _toast('Mix cancelled or failed.');
-              return;
-            }
-            if (mounted) {
-              _applyBusy(true, message: 'Preparing video…');
-            }
-            final ready = await waitUntilMinisVideoFileReady(merged);
-            if (!mounted) return;
-            if (!ready) {
-              _toast('Mixed video not ready.');
-              try {
-                await File(merged).delete();
-              } catch (_) {}
-              return;
-            }
-            if (!mounted) return;
-            if (mounted) {
-              _applyBusy(true, message: 'Encoding for device playback…');
-            }
-            var outForDelivery = merged;
-            final mixedNormalized =
-                await minisTranscodeToH264ForDevicePlayback(merged);
-            if (!mounted) return;
-            if (mixedNormalized != null) {
-              outForDelivery = mixedNormalized;
-              try {
-                await File(merged).delete();
-              } catch (_) {}
-            }
-            if (mounted) {
-              _applyBusy(false);
-            }
-            _deliverConfirmedCapture(outForDelivery);
-          } catch (e) {
-            if (mounted) {
-              _toast('Mix failed. ${minisUserFriendlyException(e)}');
-            }
-          } finally {
-            if (mounted) {
-              _applyBusy(false);
-            }
-          }
-          return;
-        }
-      }
+    if (_lastCapturePath != null && _lastCapturePath!.isNotEmpty) {
+      _deliverConfirmedCapture(_lastCapturePath!);
     }
-
-    _deliverConfirmedCapture(path);
   }
 
   Future<void> _deliverConfirmedCapture(String path) async {
@@ -2295,8 +2020,14 @@ class _MinisIndependentCaptureScreenState
   Future<void> _startRecordingInternal() async {
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
+    // Single-clip mode: only one clip allowed. If a clip already exists,
+    // prompt the user to confirm (✓) or undo (↩) first.
+    if (_videoClips.isNotEmpty) {
+      _toast('Tap ✓ to use this clip, or ↩ to remove it and record again.');
+      return;
+    }
     if (_clipsTotalDurationMs >= _sessionCapMs) {
-      _toast('Minis time limit reached. Tap check to merge or remove a clip.');
+      _toast('Time limit reached. Tap ✓ to continue or ↩ to remove the clip.');
       return;
     }
     final budgetMs = _sessionCapMs - _clipsTotalDurationMs;
@@ -2496,7 +2227,7 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
     if (_clipsTotalDurationMs >= _sessionCapMs) {
-      _toast('Minis time limit reached.');
+      _toast('Recording limit reached.');
       return;
     }
     // Bug 8 fix: cancel any in-progress zoom gesture when the shutter goes
@@ -2532,7 +2263,7 @@ class _MinisIndependentCaptureScreenState
       return;
     }
     if (widget.videoOnly) {
-      _toast('Minis is video only — hold to record.');
+      _toast('Video only — hold to record.');
       return;
     }
     unawaited(_shutterShortTapPhoto());
@@ -2791,7 +2522,7 @@ class _MinisIndependentCaptureScreenState
     if (_webUnsupported) {
       return Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(title: const Text('Minis')),
+        appBar: AppBar(title: const Text('Camera')),
         body: const Center(
           child: Padding(
             padding: EdgeInsets.all(24),
@@ -2808,7 +2539,7 @@ class _MinisIndependentCaptureScreenState
     if (_permissionDenied) {
       return Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(title: const Text('Minis')),
+        appBar: AppBar(title: const Text('Camera')),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -2841,7 +2572,7 @@ class _MinisIndependentCaptureScreenState
     if (_error != null) {
       return Scaffold(
         backgroundColor: Colors.black,
-        appBar: AppBar(title: const Text('Minis')),
+        appBar: AppBar(title: const Text('Camera')),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
@@ -3202,30 +2933,18 @@ class _MinisIndependentCaptureScreenState
                         child: FittedBox(
                           fit: BoxFit.scaleDown,
                           alignment: Alignment.centerLeft,
+                          // Single-clip mode: show gallery when no clip recorded,
+                          // show undo (delete) when a clip exists so user can re-capture.
                           child: _videoClips.isNotEmpty
-                              ? Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    _roundSecondaryButton(
-                                      icon: PhosphorIconsRegular.images,
-                                      onPressed: (_busy ||
-                                              _recording ||
-                                              _countingDown)
-                                          ? null
-                                          : () => unawaited(_openGallery()),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    _roundSecondaryButton(
-                                      icon: PhosphorIconsRegular.arrowUUpLeft,
-                                      onPressed: (_busy ||
-                                              _recording ||
-                                              _countingDown)
-                                          ? null
-                                          : () => unawaited(
-                                                _deleteLastVideoClip(),
-                                              ),
-                                    ),
-                                  ],
+                              ? _roundSecondaryButton(
+                                  icon: PhosphorIconsRegular.arrowUUpLeft,
+                                  onPressed: (_busy ||
+                                          _recording ||
+                                          _countingDown)
+                                      ? null
+                                      : () => unawaited(
+                                            _deleteLastVideoClip(),
+                                          ),
                                 )
                               : _roundSecondaryButton(
                                   icon: PhosphorIconsRegular.images,
@@ -3257,68 +2976,21 @@ class _MinisIndependentCaptureScreenState
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            widget.videoOnly
-                                ? (_videoClips.isNotEmpty
-                                    ? 'Hold to record · ${(_remainingSessionMs / 1000).ceil()}s left · gallery (left)'
-                                    : 'Hold to record video')
-                                : (_videoClips.isNotEmpty
-                                    ? 'Hold to add · ${(_remainingSessionMs / 1000).ceil()}s left · tap photo · gallery (left)'
-                                    : 'Hold for video · Tap for photo'),
-                            textAlign: TextAlign.center,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.65),
-                              fontSize: 11,
-                            ),
-                          ),
-                          if (_videoClips.isNotEmpty) ...[
-                            const SizedBox(height: 6),
-                            // [Row] + [Flexible] needs a bounded width: stretch the column and
-                            // use [mainAxisSize.max] so the label ellipsizes instead of
-                            // overflowing the bottom bar on narrow screens.
-                            Material(
-                              color: Colors.transparent,
-                              child: InkWell(
-                                onTap: (_busy || _recording || _countingDown)
-                                    ? null
-                                    : _showMultiClipReviewSheet,
-                                borderRadius: BorderRadius.circular(8),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 4,
-                                  ),
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    mainAxisSize: MainAxisSize.max,
-                                    children: [
-                                      PhosphorIcon(
-                                        PhosphorIconsRegular.stack,
-                                        size: 17,
-                                        color: Colors.white
-                                            .withValues(alpha: 0.95),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      Expanded(
-                                        child: Text(
-                                          'Multi-clip - ${_videoClips.length}',
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
+                             widget.videoOnly
+                                 ? (_videoClips.isNotEmpty
+                                     ? 'Clip recorded · tap ✓ to continue'
+                                     : 'Hold to record video · or pick from gallery')
+                                 : (_videoClips.isNotEmpty
+                                     ? 'Clip ready · tap ✓ to continue'
+                                     : 'Hold for video · tap for photo · or gallery'),
+                             textAlign: TextAlign.center,
+                             maxLines: 3,
+                             overflow: TextOverflow.ellipsis,
+                             style: TextStyle(
+                               color: Colors.white.withValues(alpha: 0.65),
+                               fontSize: 11,
+                             ),
+                           ),
                           const SizedBox(height: 6),
                           Center(
                             child: SizedBox(
@@ -3385,32 +3057,18 @@ class _MinisIndependentCaptureScreenState
                             mainAxisSize: MainAxisSize.min,
                             crossAxisAlignment: CrossAxisAlignment.center,
                             children: [
-                              if (_videoClips.isNotEmpty)
+                              if (_videoClips.isNotEmpty || _lastCapturePath != null)
                                 Padding(
                                   padding: const EdgeInsets.only(bottom: 6),
                                   child: Text(
-                                    'Merge minis',
-                                    textAlign: TextAlign.center,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color:
-                                          Colors.white.withValues(alpha: 0.7),
-                                      fontSize: 11,
-                                    ),
-                                  ),
-                                )
-                              else if (_lastCapturePath != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 6),
-                                  child: Text(
-                                    _lastCaptureIsVideo ? 'Video' : 'Photo',
+                                    _videoClips.isNotEmpty
+                                        ? 'Next'
+                                        : (_lastCaptureIsVideo ? 'Video' : 'Photo'),
                                     textAlign: TextAlign.center,
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                      color: Colors.white
-                                          .withValues(alpha: 0.7),
+                                      color: Colors.white.withValues(alpha: 0.7),
                                       fontSize: 11,
                                     ),
                                   ),

@@ -336,6 +336,12 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
 
   Future<void> _openTrim() async {
     if (!minisReelClipTrimmerPlatformSupported()) return;
+    if (_isMultiClip) {
+      _nativeController?.pause();
+    } else {
+      _controller?.pause();
+    }
+    setState(() {});
     final trimmed = await MinisReelClipTrimmerPage.open(context, File(_path));
     if (!mounted || trimmed == null || trimmed.path.isEmpty) return;
     setState(() => _path = trimmed.path);

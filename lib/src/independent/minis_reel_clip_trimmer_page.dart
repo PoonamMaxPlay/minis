@@ -183,7 +183,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         await _failLoadOrReencode();
         return;
       }
-      final capReq = widget.maxOutputDuration?.inMilliseconds ?? 30000;
+      final capReq = widget.maxOutputDuration?.inMilliseconds ?? total;
       final maxSegMs = math.min(capReq, total);
       setState(() {
         _viewerMaxOut = Duration(milliseconds: math.max(1, maxSegMs));
@@ -208,10 +208,9 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
   @override
   void dispose() {
     if (_repairTempPath != null) {
-      try {
-        File(_repairTempPath!).deleteSync();
-      } catch (_) {}
+      final path = _repairTempPath!;
       _repairTempPath = null;
+      unawaited(File(path).delete().catchError((_) => File(path)));
     }
     // Do not call [VideoPlayerController.dispose] here: [video_trimmer]'s
     // [FixedTrimViewer]/[ScrollableTrimViewer] already dispose the shared
@@ -366,7 +365,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
         title: Text(
-          capSec != null ? 'Trim (up to ${capSec}s for this mini)' : 'Trim clip',
+          capSec != null ? 'Trim (max ${capSec}s)' : 'Trim clip',
         ),
         actions: [
           TextButton(

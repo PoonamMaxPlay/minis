@@ -1,0 +1,389 @@
+diff --git a/lib/src/independent/minis_capture_screen.dart b/lib/src/independent/minis_capture_screen.dart
+index 3371f4f..7010fa6 100644
+--- a/lib/src/independent/minis_capture_screen.dart
++++ b/lib/src/independent/minis_capture_screen.dart
+@@ -17,7 +17,6 @@ import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
+ import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
+ import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
+ import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
+-import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
+ import 'package:loopit_minis/src/independent/minis_video_duration.dart';
+ import 'package:loopit_minis/src/independent/minis_multiclip_merge.dart';
+ import 'package:loopit_minis/src/independent/minis_music_segment.dart';
+@@ -25,7 +24,6 @@ import 'package:loopit_minis/src/independent/minis_music_trim_sheet.dart';
+ import 'package:loopit_minis/src/independent/minis_recording_clip.dart';
+ import 'package:loopit_minis/src/independent/minis_recording_ring_painter.dart';
+ import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
+-import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
+ import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
+ import 'package:loopit_minis/src/minis_handoff.dart';
+ import 'package:loopit_minis/src/native_video_trim_user_message.dart'
+@@ -330,7 +328,12 @@ class _MinisIndependentCaptureScreenState
+   }
+ 
+   Future<void> _retryCameraInit() async {
+-    if (_webUnsupported || _engine == null) return;
++    if (_webUnsupported) return;
++    if (_engine == null) {
++      // Engine factory failed during _boot(); re-run the full boot sequence.
++      await _boot();
++      return;
++    }
+     setState(() {
+       _error = null;
+       _busy = true;
+@@ -414,7 +417,7 @@ class _MinisIndependentCaptureScreenState
+                 const SizedBox(height: 8),
+                 Text(
+                   mergeSupported
+-                      ? 'You already have video clips in this mini. Merge your minis, remove the last clip, or keep recording video.'
++                      ? 'You already have video clips. Merge your clips, remove the last clip, or keep recording video.'
+                       : 'You already have video clips. Remove the last clip or keep recording video.',
+                   style: TextStyle(
+                     color: Colors.white.withValues(alpha: 0.78),
+@@ -429,7 +432,7 @@ class _MinisIndependentCaptureScreenState
+                       Navigator.pop(ctx);
+                       unawaited(_confirmClip());
+                     },
+-                    child: const Text('Merge minis'),
++                    child: const Text('Merge clips'),
+                   ),
+                   const SizedBox(height: 10),
+                 ],
+@@ -486,9 +489,12 @@ class _MinisIndependentCaptureScreenState
+     _holdStartTimer?.cancel();
+     _clipElapsedTicker?.cancel();
+     _zoomBadgeTimer?.cancel();
+-    unawaited(_disposeGuideMusic());
++
++    // Async cleanup must be fire-and-forget (dispose is synchronous), but we
++    // guard each call so platform callbacks arriving after teardown don't crash.
++    unawaited(_disposeGuideMusic().catchError((_) {}));
+     if (_ownEngine) {
+-      unawaited(_engine?.dispose());
++      unawaited(_engine?.dispose().catchError((_) {}) ?? Future<void>.value());
+     }
+     super.dispose();
+   }
+@@ -669,6 +675,20 @@ class _MinisIndependentCaptureScreenState
+     await _startGuideMusicForRecording();
+   }
+ 
++  /// Copy a picker/temp music file to durable app storage so it survives
++  /// until the background merge runs (picker temps are cleaned aggressively).
++  Future<MinisMusicSegment> _persistMusicSegment(MinisMusicSegment seg) async {
++    final src = File(seg.path);
++    if (!await src.exists()) return seg;
++    final dir = await getApplicationDocumentsDirectory();
++    final musicDir = Directory(p.join(dir.path, 'minis_music'));
++    if (!await musicDir.exists()) await musicDir.create(recursive: true);
++    final ext = p.extension(seg.path).isNotEmpty ? p.extension(seg.path) : '.m4a';
++    final dest = p.join(musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext');
++    await src.copy(dest);
++    return MinisMusicSegment(path: dest, startMs: seg.startMs, endMs: seg.endMs);
++  }
++
+   Future<void> _clearMusic() async {
+     if (_recording || _busy || _countingDown) return;
+     await _pauseGuideMusic();
+@@ -728,7 +748,7 @@ class _MinisIndependentCaptureScreenState
+     final capMs = _sessionCapMs;
+     final cap = minisFormatClipDurationLabel(capMs);
+     if (_videoClips.isEmpty && !_recording) {
+-      return 'Minis max $cap';
++      return 'Max $cap';
+     }
+     final usedMs =
+         _clipsTotalDurationMs + (_recording ? _liveClipElapsedMs : 0);
+@@ -839,11 +859,12 @@ class _MinisIndependentCaptureScreenState
+       _toast('Could not load selected music.');
+       return true;
+     }
+-    final segment = MinisMusicSegment(
++    var segment = MinisMusicSegment(
+       path: selection.path,
+       startMs: math.max(0, selection.startMs),
+       endMs: math.max(selection.startMs, selection.endMs),
+     );
++    segment = await _persistMusicSegment(segment);
+     setState(() => _musicSegment = segment);
+     await _prepareGuideMusic();
+     _toast('Music ready - long-press Sounds to clear');
+@@ -900,13 +921,14 @@ class _MinisIndependentCaptureScreenState
+         return;
+       }
+       if (!mounted) return;
+-      final segment = await showMinisMusicTimingSheet(
++      var segment = await showMinisMusicTimingSheet(
+         context,
+         audioPath: path,
+         sessionCapMs: _sessionCapMs,
+       );
+       if (!mounted) return;
+       if (segment == null) return;
++      segment = await _persistMusicSegment(segment);
+       setState(() => _musicSegment = segment);
+       await _prepareGuideMusic();
+       _toast('Music ready - long-press Sounds to clear');
+@@ -1270,7 +1292,7 @@ class _MinisIndependentCaptureScreenState
+     final remainingMs =
+         _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
+     if (remainingMs < 500) {
+-      _toast('No time left in this mini.');
++      _toast('No time left.');
+       try {
+         await File(materialized).delete();
+       } catch (_) {}
+@@ -1315,7 +1337,7 @@ class _MinisIndependentCaptureScreenState
+       }
+       final remSec = (remainingMs / 1000).ceil();
+       _toast(
+-        'Trim which ${remSec}s or less to add (${remSec}s left in this mini).',
++        'Trim to ${remSec}s or less to add (${remSec}s left).',
+       );
+       if (!mounted) return;
+       _applyBusy(true, message: 'Opening trim…');
+@@ -1341,7 +1363,7 @@ class _MinisIndependentCaptureScreenState
+       }
+       final outMs = trimOut.durationMs;
+       if (outMs <= 0 || _clipsTotalDurationMs + outMs > _sessionCapMs) {
+-        _toast('Trimmed segment does not fit this mini.');
++        _toast('Trimmed segment is too long.');
+         try {
+           await File(trimOut.path).delete();
+         } catch (_) {}
+@@ -1522,7 +1544,7 @@ class _MinisIndependentCaptureScreenState
+     }
+ 
+     if (_clipsTotalDurationMs + useMs > _sessionCapMs) {
+-      _toast("That clip no longer fits this mini's time limit.");
++      _toast("That clip exceeds the time limit.");
+       return false;
+     }
+     final clipId = _nextClipId++;
+@@ -1615,7 +1637,7 @@ class _MinisIndependentCaptureScreenState
+           await minisFinalizeClipDurationMs(result.durationMs, result.path);
+       final delta = newMs - clip.durationMs;
+       if (_clipsTotalDurationMs + delta > _sessionCapMs) {
+-        _toast("Trimmed clip no longer fits this mini's time cap.");
++        _toast("Trimmed clip exceeds the time limit.");
+         try {
+           await File(result.path).delete();
+         } catch (_) {}
+@@ -1726,7 +1748,7 @@ class _MinisIndependentCaptureScreenState
+         _logMulticlip(
+           'REJECT: over cap after preview (sum=$sum cap=$cap) — should be rare',
+         );
+-        _toast('That clip no longer fits the time limit for this mini. Try again.');
++        _toast('That clip exceeds the time limit. Try again.');
+         return;
+       }
+       _logMulticlip('calling _appendVideoSegment');
+@@ -2064,7 +2086,7 @@ class _MinisIndependentCaptureScreenState
+         context,
+         rawPaths,
+         title: 'Preview',
+-        confirmLabel: 'Use minis',
++        confirmLabel: 'Next',
+         allowReelTrim:
+             minisReelClipTrimmerPlatformSupported() && rawPaths.length == 1,
+         confirmOnClose: true,
+@@ -2139,36 +2161,10 @@ class _MinisIndependentCaptureScreenState
+               _toast('Mix cancelled or failed.');
+               return;
+             }
+-            if (mounted) {
+-              _applyBusy(true, message: 'Preparing video…');
+-            }
+-            final ready = await waitUntilMinisVideoFileReady(merged);
+-            if (!mounted) return;
+-            if (!ready) {
+-              _toast('Mixed video not ready.');
+-              try {
+-                await File(merged).delete();
+-              } catch (_) {}
+-              return;
+-            }
+-            if (!mounted) return;
+-            if (mounted) {
+-              _applyBusy(true, message: 'Encoding for device playback…');
+-            }
+-            var outForDelivery = merged;
+-            final mixedNormalized =
+-                await minisTranscodeToH264ForDevicePlayback(merged);
+-            if (!mounted) return;
+-            if (mixedNormalized != null) {
+-              outForDelivery = mixedNormalized;
+-              try {
+-                await File(merged).delete();
+-              } catch (_) {}
+-            }
+             if (mounted) {
+               _applyBusy(false);
+             }
+-            _deliverConfirmedCapture(outForDelivery);
++            _deliverConfirmedCapture(merged);
+           } catch (e) {
+             if (mounted) {
+               _toast('Mix failed. ${minisUserFriendlyException(e)}');
+@@ -2296,7 +2292,7 @@ class _MinisIndependentCaptureScreenState
+     final eng = _engine;
+     if (eng == null || !eng.isInitialized || _recording) return;
+     if (_clipsTotalDurationMs >= _sessionCapMs) {
+-      _toast('Minis time limit reached. Tap check to merge or remove a clip.');
++      _toast('Time limit reached. Tap check to merge or remove a clip.');
+       return;
+     }
+     final budgetMs = _sessionCapMs - _clipsTotalDurationMs;
+@@ -2321,7 +2317,7 @@ class _MinisIndependentCaptureScreenState
+           unawaited(
+             _stopRecordingInternal(
+               userMessage:
+-                  'Max minis time reached for this segment ($_speedRailLabel)',
++                  'Max time reached for this segment ($_speedRailLabel)',
+             ),
+           );
+         }
+@@ -2348,37 +2344,10 @@ class _MinisIndependentCaptureScreenState
+     try {
+       setState(() => _recording = false);
+       _applyBusy(true, message: 'Saving…');
+-      final rawPath = await eng.stopRecording();
++      final path = await eng.stopRecording();
+       if (!mounted) return;
+       _zoomGesturePointer = null;
+-      if (rawPath != null && rawPath.isNotEmpty) {
+-        // iOS: The camera plugin saves to tmp/ which is inaccessible to
+-        // AVAssetExportSession during composition (OSStatus error -12660).
+-        // Copy to Documents/loopit_minis_captures/ first on iOS.
+-        String path = rawPath;
+-        if (defaultTargetPlatform == TargetPlatform.iOS &&
+-            rawPath.contains('/tmp/')) {
+-          try {
+-            final base = await getApplicationDocumentsDirectory();
+-            final dir =
+-                Directory(p.join(base.path, 'loopit_minis_captures'));
+-            if (!await dir.exists()) await dir.create(recursive: true);
+-            final ext = p.extension(rawPath);
+-            final dest = p.join(
+-              dir.path,
+-              'minis_cam_${DateTime.now().microsecondsSinceEpoch}$ext',
+-            );
+-            await File(rawPath).copy(dest);
+-            path = dest;
+-            // Clean up tmp file after copy.
+-            try {
+-              await File(rawPath).delete();
+-            } catch (_) {}
+-          } catch (copyErr) {
+-            debugPrint('MINIS: tmp→docs copy failed: $copyErr — using raw path');
+-            path = rawPath;
+-          }
+-        }
++      if (path != null && path.isNotEmpty) {
+         final d = math.max(1, rawElapsed);
+         // Avoid probing duration on fresh camera clips — VideoPlayer init
+         // freezes the active camera preview on many Android devices!
+@@ -2496,7 +2465,7 @@ class _MinisIndependentCaptureScreenState
+     final eng = _engine;
+     if (eng == null || !eng.isInitialized || _recording) return;
+     if (_clipsTotalDurationMs >= _sessionCapMs) {
+-      _toast('Minis time limit reached.');
++      _toast('Time limit reached.');
+       return;
+     }
+     // Bug 8 fix: cancel any in-progress zoom gesture when the shutter goes
+@@ -2532,7 +2501,7 @@ class _MinisIndependentCaptureScreenState
+       return;
+     }
+     if (widget.videoOnly) {
+-      _toast('Minis is video only — hold to record.');
++      _toast('Video only \u2014 hold to record.');
+       return;
+     }
+     unawaited(_shutterShortTapPhoto());
+@@ -2791,7 +2760,7 @@ class _MinisIndependentCaptureScreenState
+     if (_webUnsupported) {
+       return Scaffold(
+         backgroundColor: Colors.black,
+-        appBar: AppBar(title: const Text('Minis')),
++        appBar: AppBar(title: const Text('Camera')),
+         body: const Center(
+           child: Padding(
+             padding: EdgeInsets.all(24),
+@@ -2808,7 +2777,7 @@ class _MinisIndependentCaptureScreenState
+     if (_permissionDenied) {
+       return Scaffold(
+         backgroundColor: Colors.black,
+-        appBar: AppBar(title: const Text('Minis')),
++        appBar: AppBar(title: const Text('Camera')),
+         body: Center(
+           child: Padding(
+             padding: const EdgeInsets.all(24),
+@@ -2841,7 +2810,7 @@ class _MinisIndependentCaptureScreenState
+     if (_error != null) {
+       return Scaffold(
+         backgroundColor: Colors.black,
+-        appBar: AppBar(title: const Text('Minis')),
++        appBar: AppBar(title: const Text('Camera')),
+         body: Center(
+           child: Padding(
+             padding: const EdgeInsets.all(24),
+@@ -2869,7 +2838,39 @@ class _MinisIndependentCaptureScreenState
+     final topPad = MediaQuery.paddingOf(context).top;
+     final bottomPad = MediaQuery.paddingOf(context).bottom;
+ 
+-    return Scaffold(
++    return PopScope(
++      canPop: !_recording && _videoClips.isEmpty,
++      onPopInvokedWithResult: (didPop, _) {
++        if (didPop) return;
++        if (_recording) {
++          _toast('Stop recording before leaving.');
++          return;
++        }
++        // Has clips — confirm discard.
++        showDialog<bool>(
++          context: context,
++          builder: (ctx) => AlertDialog(
++            title: const Text('Discard clips?'),
++            content: Text(
++              '${_videoClips.length} clip${_videoClips.length == 1 ? '' : 's'} '
++              'will be lost.',
++            ),
++            actions: [
++              TextButton(
++                onPressed: () => Navigator.pop(ctx, false),
++                child: const Text('Keep editing'),
++              ),
++              TextButton(
++                onPressed: () => Navigator.pop(ctx, true),
++                child: const Text('Discard'),
++              ),
++            ],
++          ),
++        ).then((discard) {
++          if (discard == true && mounted) Navigator.of(context).pop();
++        });
++      },
++      child: Scaffold(
+       backgroundColor: Colors.black,
+       body: Stack(
+         fit: StackFit.expand,
+@@ -3389,7 +3390,7 @@ class _MinisIndependentCaptureScreenState
+                                 Padding(
+                                   padding: const EdgeInsets.only(bottom: 6),
+                                   child: Text(
+-                                    'Merge minis',
++                                    'Merge clips',
+                                     textAlign: TextAlign.center,
+                                     maxLines: 2,
+                                     overflow: TextOverflow.ellipsis,
+@@ -3448,6 +3449,7 @@ class _MinisIndependentCaptureScreenState
+           ),
+         ],
+       ),
++    ),
+     );
+   }
+ }

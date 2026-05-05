@@ -1,6 +1,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
@@ -91,6 +92,8 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
           imageFormatGroup: ImageFormatGroup.yuv420,
         );
         await created.initialize();
+        // Lock capture orientation to portrait (matches Android behavior).
+        await created.lockCaptureOrientation(DeviceOrientation.portraitUp);
         _controller = created;
         created = null;
 
