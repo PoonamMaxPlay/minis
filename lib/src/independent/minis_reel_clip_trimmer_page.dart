@@ -248,7 +248,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       );
 
       if (!mounted) return;
-      if (result.isNotEmpty && File(result).existsSync()) {
+      if (result.isNotEmpty && File(result).existsSync() && File(result).lengthSync() > 0) {
         final spanMs =
             (_endMs - _startMs).round().clamp(1, 24 * 60 * 60 * 1000);
         Navigator.of(context, rootNavigator: true).pop(
