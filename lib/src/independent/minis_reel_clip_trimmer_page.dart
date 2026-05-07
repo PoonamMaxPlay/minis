@@ -11,12 +11,8 @@ import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:path/path.dart' as p;
 import 'package:video_trimmer/video_trimmer.dart';
 
-/// Android / iOS only - same stack as LoopIt [ReelClipTrimmerPage].
-bool minisReelClipTrimmerPlatformSupported() {
-  if (kIsWeb) return false;
-  return defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
-}
+/// Trim feature is currently disabled (hidden for this release).
+bool minisReelClipTrimmerPlatformSupported() => false;
 
 /// Path and duration from [MinisReelClipTrimmerPage] save.
 ///
@@ -420,43 +416,46 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                   maxWidth: width,
                   minHeight: 100,
                 ),
-                child: TrimViewer(
-                  trimmer: _trimmer,
-                  viewerHeight: 56,
-                  viewerWidth: width,
-                  maxVideoLength: _viewerMaxOut,
-                  type: ViewerType.auto,
-                  durationStyle: DurationStyle.FORMAT_MM_SS,
-                  onChangeStart: (v) => _startMs = v,
-                  // Bug 5 fix: clamp end handle so it never exceeds
-                  // startMs + the viewer cap (video_trimmer callbacks can
-                  // fire slightly out-of-bounds on a fast fling).
-                  onChangeEnd: (v) {
-                    final maxEnd = _startMs +
-                        _viewerMaxOut.inMilliseconds.toDouble();
-                    _endMs = v.clamp(_startMs, maxEnd);
-                  },
-                  onChangePlaybackState: (playing) {
-                    if (mounted) {
-                      setState(() => _isPlaying = playing);
-                    }
-                  },
-                ),
+                child: _videoLoaded
+                    ? TrimViewer(
+                        trimmer: _trimmer,
+                        viewerHeight: 56,
+                        viewerWidth: width,
+                        maxVideoLength: _viewerMaxOut,
+                        type: ViewerType.auto,
+                        durationStyle: DurationStyle.FORMAT_MM_SS,
+                        onChangeStart: (v) => _startMs = v,
+                        onChangeEnd: (v) {
+                          final maxEnd = _startMs +
+                              _viewerMaxOut.inMilliseconds.toDouble();
+                          _endMs = v.clamp(_startMs, maxEnd);
+                        },
+                        onChangePlaybackState: (playing) {
+                          if (mounted) {
+                            setState(() => _isPlaying = playing);
+                          }
+                        },
+                      )
+                    : SizedBox(height: 56, width: width),
               ),
               const SizedBox(height: 8),
               Center(
                 child: IconButton(
                   iconSize: 64,
                   color: Colors.white,
-                  onPressed: () async {
-                    final playing = await _trimmer.videoPlaybackControl(
-                      startValue: _startMs,
-                      endValue: _endMs,
-                    );
-                    if (mounted) {
-                      setState(() => _isPlaying = playing);
-                    }
-                  },
+                  onPressed: !_videoLoaded
+                      ? null
+                      : () async {
+                          if (_endMs <= _startMs) return;
+                          final playing =
+                              await _trimmer.videoPlaybackControl(
+                            startValue: _startMs,
+                            endValue: _endMs,
+                          );
+                          if (mounted) {
+                            setState(() => _isPlaying = playing);
+                          }
+                        },
                   icon: Icon(
                     _isPlaying
                         ? Icons.pause_circle_filled

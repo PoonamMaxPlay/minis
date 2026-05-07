@@ -69,7 +69,7 @@ class MinisHandoffRequest {
       'clipPaths': clipPaths,
       'playbackSpeed': playbackSpeed,
       'enableAudio': enableAudio,
-      'backgroundMusic': backgroundMusic,
+      'backgroundMusic': backgroundMusic?.toMap(),
     };
   }
 }
