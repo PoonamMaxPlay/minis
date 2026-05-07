@@ -79,51 +79,80 @@ public class MinisPreviewPlayer: NSObject, FlutterPlatformView {
     }
     
     private func setupPlayer(paths: [String]) {
-        let composition = AVMutableComposition()
-        var insertTime = CMTime.zero
-        
-        guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-              let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            return
-        }
-        
-        for path in paths {
-            let url = URL(fileURLWithPath: path)
-            let asset = AVURLAsset(url: url)
+        Task {
+            let composition = AVMutableComposition()
+            var insertTime = CMTime.zero
             
-            let duration = asset.duration
-            let timeRange = CMTimeRange(start: .zero, duration: duration)
+            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
+                  let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                return
+            }
             
-            do {
-                if let assetVideoTrack = asset.tracks(withMediaType: .video).first {
-                    try videoTrack.insertTimeRange(timeRange, of: assetVideoTrack, at: insertTime)
-                    if insertTime == .zero {
-                        videoSize = assetVideoTrack.naturalSize.applying(assetVideoTrack.preferredTransform)
-                        videoSize = CGSize(width: abs(videoSize.width), height: abs(videoSize.height))
-                        // Also apply transform so video is not rotated
-                        videoTrack.preferredTransform = assetVideoTrack.preferredTransform
+            for path in paths {
+                let url = URL(fileURLWithPath: path)
+                let asset = AVURLAsset(url: url)
+                
+                let duration: CMTime
+                if #available(iOS 15.0, *) {
+                    duration = try await asset.load(.duration)
+                } else {
+                    duration = asset.duration
+                }
+                let timeRange = CMTimeRange(start: .zero, duration: duration)
+                
+                do {
+                    let assetVideoTracks: [AVAssetTrack]
+                    let assetAudioTracks: [AVAssetTrack]
+                    if #available(iOS 15.0, *) {
+                        assetVideoTracks = try await asset.loadTracks(withMediaType: .video)
+                        assetAudioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+                    } else {
+                        assetVideoTracks = asset.tracks(withMediaType: .video)
+                        assetAudioTracks = asset.tracks(withMediaType: .audio)
                     }
+                    
+                    if let vTrack = assetVideoTracks.first {
+                        try videoTrack.insertTimeRange(timeRange, of: vTrack, at: insertTime)
+                        if insertTime == .zero {
+                            let transform: CGAffineTransform
+                            let naturalSize: CGSize
+                            if #available(iOS 15.0, *) {
+                                transform = try await vTrack.load(.preferredTransform)
+                                naturalSize = try await vTrack.load(.naturalSize)
+                            } else {
+                                transform = vTrack.preferredTransform
+                                naturalSize = vTrack.naturalSize
+                            }
+                            self.videoSize = naturalSize.applying(transform)
+                            self.videoSize = CGSize(width: abs(self.videoSize.width), height: abs(self.videoSize.height))
+                            videoTrack.preferredTransform = transform
+                        }
+                    }
+                    if let aTrack = assetAudioTracks.first {
+                        try audioTrack.insertTimeRange(timeRange, of: aTrack, at: insertTime)
+                    }
+                    insertTime = CMTimeAdd(insertTime, duration)
+                } catch {
+                    print("Error inserting track: \(error)")
                 }
-                if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
-                    try audioTrack.insertTimeRange(timeRange, of: assetAudioTrack, at: insertTime)
-                }
-                insertTime = CMTimeAdd(insertTime, duration)
-            } catch {
-                print("Error inserting track: \(error)")
+            }
+            
+            let totalMs = Int(CMTimeGetSeconds(insertTime) * 1000)
+            
+            await MainActor.run {
+                self.totalDurationMs = totalMs
+                
+                let playerItem = AVPlayerItem(asset: composition)
+                let queuePlayer = AVQueuePlayer(playerItem: playerItem)
+                self.playerLooper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
+                
+                self.playerLayer.player = queuePlayer
+                self.playerLayer.videoGravity = .resizeAspect
+                self.player = queuePlayer
+                
+                queuePlayer.play()
             }
         }
-        
-        totalDurationMs = Int(CMTimeGetSeconds(insertTime) * 1000)
-        
-        let playerItem = AVPlayerItem(asset: composition)
-        let queuePlayer = AVQueuePlayer(playerItem: playerItem)
-        self.playerLooper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
-        
-        playerLayer.player = queuePlayer
-        playerLayer.videoGravity = .resizeAspect
-        self.player = queuePlayer
-        
-        queuePlayer.play()
     }
     
     public func view() -> UIView {

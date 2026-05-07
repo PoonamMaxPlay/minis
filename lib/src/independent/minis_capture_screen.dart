@@ -497,8 +497,8 @@ class _MinisIndependentCaptureScreenState
 
   @override
   void dispose() {
-    // Stay portrait-up when leaving capture (host app is portrait-only).
-    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    // Restore to all orientations when leaving capture.
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
 
     _maxRecordTimer?.cancel();
     _holdStartTimer?.cancel();
@@ -1601,8 +1601,9 @@ class _MinisIndependentCaptureScreenState
 
   Future<void> _deleteLastVideoClip() async {
     if (_videoClips.isEmpty) return;
-    final removed = _videoClips.removeLast();
+    late final MinisRecordingClip removed;
     setState(() {
+      removed = _videoClips.removeLast();
       _clipsTotalDurationMs =
           math.max(0, _clipsTotalDurationMs - removed.durationMs);
     });
@@ -2111,9 +2112,7 @@ class _MinisIndependentCaptureScreenState
           }
         }
         final d = math.max(1, rawElapsed);
-        // Avoid probing duration on fresh camera clips — VideoPlayer init
-        // freezes the active camera preview on many Android devices!
-        await _appendVideoSegment(path, d, durationAlreadyFinalized: true);
+        await _appendVideoSegment(path, d);
       } else {
         _toast('No video file from camera.');
       }

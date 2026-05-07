@@ -266,7 +266,13 @@ object MinisCameraXBridge {
                 return@post
             }
             pendingStopResult = result
-            runCatching { rec.stop() }
+            runCatching { rec.stop() }.onFailure { e ->
+                Log.e(TAG, "stopRecording: rec.stop() threw", e)
+                pendingStopResult?.error("STOP_FAILED", e.message, null)
+                pendingStopResult = null
+                activeRecording = null
+                isRecordingAtomic.set(false)
+            }
         }
     }
 

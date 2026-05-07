@@ -18,6 +18,20 @@ class MinisMusicSegment {
   final int endMs;
 
   int get windowMs => endMs - startMs;
+
+  Map<String, dynamic> toMap() => {
+        'path': path,
+        'startMs': startMs,
+        'endMs': endMs,
+      };
+
+  factory MinisMusicSegment.fromMap(Map<String, dynamic> map) {
+    return MinisMusicSegment(
+      path: map['path'] as String? ?? '',
+      startMs: (map['startMs'] as num?)?.toInt() ?? 0,
+      endMs: (map['endMs'] as num?)?.toInt() ?? 0,
+    );
+  }
 }
 
 /// [audio_waveforms] player + trim UI are implemented for Android and iOS only.

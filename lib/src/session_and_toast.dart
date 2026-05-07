@@ -75,7 +75,11 @@ void showMinisToast(
     );
 
     overlay.insert(entry);
-    Future<void>.delayed(duration, entry.remove);
+    Future<void>.delayed(duration, () {
+      try {
+        entry.remove();
+      } catch (_) {}
+    });
     return;
   }
 

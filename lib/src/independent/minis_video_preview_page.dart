@@ -190,11 +190,9 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   }
 
   Future<void> _probeAllClipsDuration() async {
-    int total = 0;
-    for (final p in _paths) {
-      final ms = await minisResolveVideoDurationMs(p);
-      total += ms;
-    }
+    final futures = _paths.map((p) => minisResolveVideoDurationMs(p));
+    final results = await Future.wait(futures);
+    final total = results.fold<int>(0, (sum, ms) => sum + ms);
     if (mounted) {
       setState(() => _probedDurationMs = total);
     }
@@ -313,7 +311,16 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   }
 
   void _initController() {
-    unawaited(_initPlaybackAsync());
+    if (_isMultiClip) {
+      _nativeController?.dispose();
+      _nativeController = MinisPreviewPlayerController(_paths);
+      _nativeController!.addListener(() {
+        if (mounted) setState(() {});
+      });
+      if (mounted) setState(() {});
+    } else {
+      unawaited(_initPlaybackAsync());
+    }
   }
 
   void _onVideoTick() {
@@ -578,9 +585,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
                 tooltip: 'Trim',
                 icon: const Icon(Icons.content_cut),
                 color: const Color(0xFF5AC8FA),
-                onPressed: _playbackErrorText != null ||
-                        c == null ||
-                        !c.value.isInitialized
+                onPressed: _playbackErrorText != null || !_isReady
                     ? null
                     : _openTrim,
               ),

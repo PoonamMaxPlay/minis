@@ -25,6 +25,7 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
   List<CameraDescription> _cameras = const [];
   bool _torchOn = false;
   bool _audioEnabled = true;
+  bool _cameraTransitioning = false;
 
   /// First successful primary preset for this session (after auto-resolve).
   ResolutionPreset? _sessionPrimaryPreset;
@@ -74,6 +75,9 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
     CameraDescription description,
     bool enableAudio,
   ) async {
+    if (_cameraTransitioning) return;
+    _cameraTransitioning = true;
+    try {
     await _controller?.dispose();
     _controller = null;
     _torchOn = false;
@@ -119,6 +123,9 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
       'Camera initialization failed for all resolution rungs (from '
       '${chain.first}): $lastError',
     );
+    } finally {
+      _cameraTransitioning = false;
+    }
   }
 
   @override

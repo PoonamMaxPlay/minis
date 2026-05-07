@@ -158,13 +158,13 @@ Future<int> _resolveGalleryFileDurationMs(
   String filePath,
   int reportedMs,
 ) async {
-  debugPrint('\n=== MINIS DURATION PROBE START ===');
-  debugPrint('Path: $filePath');
-  debugPrint('Reported: $reportedMs');
+  if (kDebugMode) debugPrint('\n=== MINIS DURATION PROBE START ===');
+  if (kDebugMode) debugPrint('Path: $filePath');
+  if (kDebugMode) debugPrint('Reported: $reportedMs');
   
   final file = File(filePath);
   if (!await file.exists()) {
-    debugPrint('ERROR: File does not exist! Returning ${math.max(reportedMs, 1)}');
+    if (kDebugMode) debugPrint('ERROR: File does not exist! Returning ${math.max(reportedMs, 1)}');
     return math.max(reportedMs, 1);
   }
 
@@ -179,7 +179,7 @@ Future<int> _resolveGalleryFileDurationMs(
 
   int best = 0;
   try {
-    debugPrint('Racing all 3 probers (early exit on first valid)...');
+    if (kDebugMode) debugPrint('Racing all 3 probers (early exit on first valid)...');
 
     final completer = Completer<int>();
     int completedCount = 0;
@@ -188,8 +188,8 @@ Future<int> _resolveGalleryFileDurationMs(
       if (val > best) best = val;
       completedCount++;
       if (!completer.isCompleted) {
-        if (val > 1000) {
-          completer.complete(val);
+        if (best > 1000 && completedCount >= 1) {
+          completer.complete(best);
         } else if (completedCount == 3) {
           completer.complete(best);
         }
@@ -203,13 +203,13 @@ Future<int> _resolveGalleryFileDurationMs(
     best = await completer.future.timeout(
       const Duration(seconds: 5),
       onTimeout: () {
-        debugPrint('ERROR: Race timed out, using best=$best');
+        if (kDebugMode) debugPrint('ERROR: Race timed out, using best=$best');
         return best;
       },
     );
-    debugPrint('Race completed. Best raw probe: $best');
+    if (kDebugMode) debugPrint('Race completed. Best raw probe: $best');
   } catch (e, st) {
-    debugPrint('ERROR: Exception during race: $e\n$st');
+    if (kDebugMode) debugPrint('ERROR: Exception during race: $e\n$st');
   }
 
   if (best <= 2000) {
@@ -222,50 +222,50 @@ Future<int> _resolveGalleryFileDurationMs(
       if (fallbackMs > 180000) fallbackMs = 180000;
       if (fallbackMs < 5000) fallbackMs = 5000;
       
-      debugPrint('MINIS: Probes failed/returned $best for a large file (${len} bytes). Estimated ${fallbackMs}ms instead of fixed 180s.');
+      if (kDebugMode) debugPrint('MINIS: Probes failed/returned $best for a large file ($len bytes). Estimated ${fallbackMs}ms.');
       best = fallbackMs;
     } else if (best <= 0) {
-      debugPrint('MINIS: Probes failed to read metadata. Using 60s fallback.');
-      best = 60000;
+      if (kDebugMode) debugPrint('MINIS: Probes failed to read metadata. Using reported duration.');
+      best = math.max(reportedMs, 1);
     }
   }
 
   final endTime = DateTime.now();
-  debugPrint('Probes took ${endTime.difference(startTime).inMilliseconds}ms. Best raw probe: $best');
+  if (kDebugMode) debugPrint('Probes took ${endTime.difference(startTime).inMilliseconds}ms. Best raw probe: $best');
 
   final coalesced = minisCoalesceClipDurationMs(
     math.max(reportedMs, 1),
     best,
   );
   
-  debugPrint('Final coalesced duration: $coalesced');
-  debugPrint('=== MINIS DURATION PROBE END ===\n');
+  if (kDebugMode) debugPrint('Final coalesced duration: $coalesced');
+  if (kDebugMode) debugPrint('=== MINIS DURATION PROBE END ===\n');
   return math.max(coalesced, 1);
 }
 
 Future<int> _probeViaMeta(File file) async {
   try {
-    debugPrint('[_probeViaMeta] Starting ProVideoEditor metadata read...');
+    if (kDebugMode) debugPrint('[_probeViaMeta] Starting ProVideoEditor metadata read...');
     final meta = await ProVideoEditor.instance
         .getMetadata(EditorVideo.file(file))
         .timeout(const Duration(seconds: 3));
-    debugPrint('[_probeViaMeta] Success! duration=${meta.duration.inMilliseconds}ms');
+    if (kDebugMode) debugPrint('[_probeViaMeta] Success! duration=${meta.duration.inMilliseconds}ms');
     return meta.duration.inMilliseconds.clamp(0, 1 << 30);
   } catch (e, st) {
-    debugPrint('[_probeViaMeta] Failed: $e\n$st');
+    if (kDebugMode) debugPrint('[_probeViaMeta] Failed: $e\n$st');
     return 0;
   }
 }
 
 Future<int> _probeViaVideoCompress(String filePath) async {
   try {
-    debugPrint('[_probeViaVideoCompress] Starting VideoCompress metadata read...');
+    if (kDebugMode) debugPrint('[_probeViaVideoCompress] Starting VideoCompress metadata read...');
     final info = await VideoCompress.getMediaInfo(filePath).timeout(const Duration(seconds: 4));
     final durationMs = info.duration?.toInt() ?? 0;
-    debugPrint('[_probeViaVideoCompress] Success! duration=${durationMs}ms');
+    if (kDebugMode) debugPrint('[_probeViaVideoCompress] Success! duration=${durationMs}ms');
     return durationMs;
   } catch (e, st) {
-    debugPrint('[_probeViaVideoCompress] Failed: $e\n$st');
+    if (kDebugMode) debugPrint('[_probeViaVideoCompress] Failed: $e\n$st');
     return 0;
   }
 }
@@ -292,18 +292,20 @@ Future<int> minisFinalizeClipDurationMs(
   bool fromGalleryPreview = false,
   bool fromGalleryFile = false,
 }) async {
-  debugPrint('======================================');
-  debugPrint('MINIS: minisFinalizeClipDurationMs');
-  debugPrint('MINIS: reportedMs=$reportedMs, fromGalleryPreview=$fromGalleryPreview, fromGalleryFile=$fromGalleryFile');
-  debugPrint('======================================');
+  if (kDebugMode) {
+    debugPrint('======================================');
+    debugPrint('MINIS: minisFinalizeClipDurationMs');
+    debugPrint('MINIS: reportedMs=$reportedMs, fromGalleryPreview=$fromGalleryPreview, fromGalleryFile=$fromGalleryFile');
+    debugPrint('======================================');
+  }
   
   // Fast path: gallery / media-library files are fully written.
   if (fromGalleryFile || fromGalleryPreview) {
-    debugPrint('MINIS: Using _resolveGalleryFileDurationMs (fast path)');
+    if (kDebugMode) debugPrint('MINIS: Using _resolveGalleryFileDurationMs (fast path)');
     return _resolveGalleryFileDurationMs(filePath, reportedMs);
   }
 
-  debugPrint('MINIS: Using slow path for freshly recorded clip');
+  if (kDebugMode) debugPrint('MINIS: Using slow path for freshly recorded clip');
   // Slow path: freshly recorded camera clip.
   final r = reportedMs.clamp(1, 1 << 30);
   var probed = await minisResolveVideoDurationMsBestEffort(filePath);

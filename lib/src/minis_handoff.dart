@@ -51,7 +51,12 @@ class MinisHandoffRequest {
       clipPaths: (map['clipPaths'] as List?)?.cast<String>() ?? [],
       playbackSpeed: (map['playbackSpeed'] as num?)?.toDouble() ?? 1.0,
       enableAudio: map['enableAudio'] as bool? ?? true,
-      backgroundMusic: map['backgroundMusic'] as MinisMusicSegment?,
+      backgroundMusic: map['backgroundMusic'] is MinisMusicSegment
+          ? map['backgroundMusic'] as MinisMusicSegment
+          : map['backgroundMusic'] is Map
+              ? MinisMusicSegment.fromMap(
+                  Map<String, dynamic>.from(map['backgroundMusic'] as Map))
+              : null,
     );
   }
 

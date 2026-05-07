@@ -43,18 +43,24 @@ class MinisPreviewPlayer(
         @Suppress("UNCHECKED_CAST")
         paths = creationParams?.get("paths") as? List<String> ?: emptyList()
 
-        player = ExoPlayer.Builder(context).build().apply {
-            setVideoSurfaceView(surfaceView)
-            val mediaItems = paths.map { MediaItem.fromUri(Uri.parse(it)) }
-            setMediaItems(mediaItems)
-            repeatMode = Player.REPEAT_MODE_ALL
-            addListener(this@MinisPreviewPlayer)
-            prepare()
-            playWhenReady = true
-        }
-        // Warm file-based durations so first Flutter poll gets the full multi-clip length.
-        if (paths.size > 1) {
-            pathDurationMsCache
+        try {
+            player = ExoPlayer.Builder(context).build().apply {
+                setVideoSurfaceView(surfaceView)
+                val mediaItems = paths.map { MediaItem.fromUri(Uri.parse(it)) }
+                setMediaItems(mediaItems)
+                repeatMode = Player.REPEAT_MODE_ALL
+                addListener(this@MinisPreviewPlayer)
+                prepare()
+                playWhenReady = true
+            }
+            // Warm file-based durations so first Flutter poll gets the full multi-clip length.
+            if (paths.size > 1) {
+                pathDurationMsCache
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MinisPreviewPlayer", "init failed, releasing player", e)
+            player?.release()
+            player = null
         }
     }
 

@@ -647,6 +647,11 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
     unawaited(_audioPlayer.pausePlayer());
     unawaited(_audioPlayer.release());
     _audioPlayer.dispose();
+    // Clean up the temp audio copy if one was created.
+    final tempPath = _playbackPath;
+    if (tempPath != null && tempPath != widget.audioPath) {
+      File(tempPath).delete().catchError((_) => File(tempPath));
+    }
     super.dispose();
   }
 
