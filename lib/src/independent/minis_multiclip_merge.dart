@@ -135,6 +135,13 @@ Future<String?> mergeMinisVideoClipsWithDialog({
     }
   }
 
+  if (clipPaths.length == 1 &&
+      playbackSpeed == 1.0 &&
+      enableAudio == true &&
+      (backgroundMusic == null || backgroundMusic.path.trim().isEmpty)) {
+    return clipPaths.first;
+  }
+
   final id = DateTime.now().microsecondsSinceEpoch.toString();
   final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
   final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
@@ -218,7 +225,12 @@ Future<String?> mergeMinisVideoClipsWithDialog({
     return finalPath;
   } on RenderCanceledException {
     return null;
-  } catch (_) {
+  } catch (e, st) {
+    dev.log('minis merge failed: $e', error: e, stackTrace: st, name: 'MinisMerge');
+    if (clipPaths.length == 1) {
+      dev.log('minis merge fallback to original clip', name: 'MinisMerge');
+      return clipPaths.first;
+    }
     rethrow;
   }
 }
@@ -235,6 +247,13 @@ Future<String?> mergeMinisVideoClipsSilent({
   if (!minisMulticlipMergeSupported()) return null;
   for (final path in clipPaths) {
     if (!File(path).existsSync()) return null;
+  }
+
+  if (clipPaths.length == 1 &&
+      playbackSpeed == 1.0 &&
+      enableAudio == true &&
+      (backgroundMusic == null || backgroundMusic.path.trim().isEmpty)) {
+    return clipPaths.first;
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
@@ -291,8 +310,13 @@ Future<String?> mergeMinisVideoClipsSilent({
   } on RenderCanceledException {
     await progressSub?.cancel();
     return null;
-  } catch (e) {
+  } catch (e, st) {
     await progressSub?.cancel();
+    dev.log('minis merge silent failed: $e', error: e, stackTrace: st, name: 'MinisMerge');
+    if (clipPaths.length == 1) {
+      dev.log('minis merge silent fallback to original clip', name: 'MinisMerge');
+      return clipPaths.first;
+    }
     if (MinisCaptureHost.hasHandoffOverlay) {
       MinisCaptureHost.reportHandoffError(minisUserFriendlyException(e));
     }

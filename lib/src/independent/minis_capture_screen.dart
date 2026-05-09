@@ -1893,11 +1893,8 @@ class _MinisIndependentCaptureScreenState
 
       // Deliver to host app
       final request = MinisHandoffRequest(
-        action: MinisHandoffAction.mergeRequired,
-        clipPaths: [finalPath],
-        playbackSpeed: 1.0, // already applied
-        enableAudio: true, // already applied/muted
-        backgroundMusic: null, // already applied
+        action: MinisHandoffAction.none,
+        path: finalPath,
       );
       MinisCaptureHost.completeCaptureResult(request.toMap());
       if (mounted) {
