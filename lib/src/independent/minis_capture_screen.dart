@@ -1549,7 +1549,9 @@ class _MinisIndependentCaptureScreenState
       }
     }
 
-    if (_clipsTotalDurationMs + useMs > _sessionCapMs) {
+    // Allow a 1-second buffer on iOS for timer jitter and system latency during stopRecording.
+    final buffer = defaultTargetPlatform == TargetPlatform.iOS ? 1000 : 0;
+    if (_clipsTotalDurationMs + useMs > _sessionCapMs + buffer) {
       _toast("That clip no longer fits this mini's time limit.");
       return false;
     }
@@ -2041,7 +2043,7 @@ class _MinisIndependentCaptureScreenState
       unawaited(_ensureGuideMusicPlayingAfterRecordStart());
       _clipElapsedTicker?.cancel();
       _clipElapsedTicker =
-          Timer.periodic(const Duration(milliseconds: 200), (_) {
+          Timer.periodic(const Duration(milliseconds: 50), (_) {
         if (mounted && _recording) setState(() {});
       });
       _maxRecordTimer?.cancel();
