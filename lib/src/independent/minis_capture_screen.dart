@@ -49,11 +49,13 @@ enum MinisRecordCountdownMode {
 /// Full-screen Minis-style capture using only [MinisCameraEnginePort] (default:
 /// [CameraPluginMinisEngine], no Retrytech).
 ///
-/// **Hold** the shutter to record video; **short tap** takes a photo unless
+/// **Hold** the shutter to start recording video — once recording is armed
+/// you can release; recording continues until you **tap** the shutter (now
+/// showing a stop icon) to stop. **Short tap** takes a photo unless
 /// **videoOnly** is set (host “Minis / reel” flows — video only). **Swipe
 /// up/down on the preview** to zoom in/out anytime the camera is idle or while
 /// recording (device support via [MinisCameraEnginePort] zoom). Each
-/// completed video (release after hold) **appends** a segment (LoopIt-style
+/// completed video (tap-to-stop after hold) **appends** a segment (LoopIt-style
 /// multi-clip reel) until you tap the checkmark to **merge** segments with
 /// [pro_video_editor]. **Gallery** uses [ImagePicker.pickMedia]; with recorded
 /// segments the bottom-left shows **gallery** and **remove last clip** side by
@@ -688,11 +690,26 @@ class _MinisIndependentCaptureScreenState
     await _startGuideMusicForRecording();
   }
 
+  Future<void> _deleteMusicSegmentFile(MinisMusicSegment? seg) async {
+    if (seg == null) return;
+    try {
+      final f = File(seg.path);
+      if (await f.exists() && seg.path.contains('/minis_music/')) {
+        await f.delete();
+        debugPrint('minis: deleted old music file: ${seg.path}');
+      }
+    } catch (e) {
+      debugPrint('minis: failed to delete old music file: $e');
+    }
+  }
+
   Future<void> _clearMusic() async {
     if (_recording || _busy || _countingDown) return;
     await _pauseGuideMusic();
     await _disposeGuideMusic();
+    final oldSeg = _musicSegment;
     if (mounted) setState(() => _musicSegment = null);
+    await _deleteMusicSegmentFile(oldSeg);
     _toast('Music cleared');
   }
 
@@ -873,11 +890,21 @@ class _MinisIndependentCaptureScreenState
     final ext = p.extension(seg.path).isNotEmpty ? p.extension(seg.path) : '.m4a';
     final dest = p.join(musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext');
     await src.copy(dest);
+    
+    // Proactively clean up the old file
+    if (_musicSegment != null && _musicSegment!.path != dest) {
+      await _deleteMusicSegmentFile(_musicSegment);
+    }
+    
     return MinisMusicSegment(path: dest, startMs: seg.startMs, endMs: seg.endMs);
   }
 
   Future<void> _pickMusic() async {
     if (kIsWeb || _busy || _recording || _countingDown) return;
+    if (_musicSegment != null) {
+      _toast('Only one music can be selected.');
+      return;
+    }
     try {
       final handledByHost = await _pickMusicFromHostIfAvailable();
       if (handledByHost) return;
@@ -1897,11 +1924,12 @@ class _MinisIndependentCaptureScreenState
       final request = MinisHandoffRequest(
         action: MinisHandoffAction.none,
         path: finalPath,
+        backgroundMusic: _musicSegment,
       );
       MinisCaptureHost.completeCaptureResult(request.toMap());
       if (mounted) {
         final nav = Navigator.maybeOf(context, rootNavigator: true);
-        if (nav != null && nav.canPop()) nav.pop();
+        if (nav != null && nav.canPop()) nav.pop(request.toMap());
       }
       return;
     }
@@ -2223,7 +2251,11 @@ class _MinisIndependentCaptureScreenState
   void _onShutterPointerDown(PointerDownEvent event) {
     if (_busy || _countingDown) return;
     final eng = _engine;
-    if (eng == null || !eng.isInitialized || _recording) return;
+    if (eng == null || !eng.isInitialized) return;
+    // Already recording: this press is a tap-to-stop. Handle on pointer up
+    // so the user can briefly press the (stop-icon) shutter without arming
+    // the hold-to-record timer.
+    if (_recording) return;
     if (_clipsTotalDurationMs >= _sessionCapMs) {
       _toast('Recording limit reached.');
       return;
@@ -2244,6 +2276,11 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer = Timer(const Duration(milliseconds: 280), () {
       if (!mounted || !_shutterFingerDown) return;
       _holdVideoArmed = true;
+      // Recording is now armed and starting. Release the shutter-finger
+      // lock so the user can lift their finger (recording keeps running
+      // until they tap the stop button) and so zoom gestures on the
+      // preview work during recording.
+      _shutterFingerDown = false;
       unawaited(_startRecordingInternal());
     });
   }
@@ -2255,9 +2292,13 @@ class _MinisIndependentCaptureScreenState
     _shutterFingerDown = false;
     _holdVideoArmed = false;
     if (wasHold) {
-      if (_recording) {
-        unawaited(_stopRecordingInternal());
-      }
+      // Recording started via this hold and keeps running after release.
+      // The user stops it with a tap on the shutter (handled below).
+      return;
+    }
+    if (_recording) {
+      // Tap-to-stop while recording is active.
+      unawaited(_stopRecordingInternal());
       return;
     }
     if (widget.videoOnly) {
