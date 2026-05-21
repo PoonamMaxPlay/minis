@@ -215,6 +215,14 @@ class _MinisIndependentCaptureScreenState
   Timer? _holdStartTimer;
   bool _shutterFingerDown = false;
   bool _holdVideoArmed = false;
+  bool _recordingLocked = false;
+  bool _lockReadyToEngage = false;
+  bool _pendingStopTap = false;
+  double _shutterPointerStartDx = 0;
+  double _lockDragProgress = 0;
+  static const double _kLockTriggerDistance = 72;
+  late final AnimationController _lockPulseController;
+  late final AnimationController _recordPulseController;
   MinisMusicSegment? _musicSegment;
   PlayerController? _musicGuidePlayer;
   StreamSubscription<int>? _musicGuidePosSub;
@@ -249,6 +257,14 @@ class _MinisIndependentCaptureScreenState
   @override
   void initState() {
     super.initState();
+    _lockPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat();
+    _recordPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
     // Lock orientation to portrait when entering capture screen
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -506,6 +522,8 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _clipElapsedTicker?.cancel();
     _zoomBadgeTimer?.cancel();
+    _lockPulseController.dispose();
+    _recordPulseController.dispose();
     unawaited(_manageAudioSession(false));
     unawaited(_disposeGuideMusic().catchError((_) {}));
     if (_ownEngine) {
@@ -2094,6 +2112,12 @@ class _MinisIndependentCaptureScreenState
   Future<void> _stopRecordingInternal({String? userMessage}) async {
     final eng = _engine;
     if (eng == null || !_recording) return;
+    _recordingLocked = false;
+    _lockReadyToEngage = false;
+    _holdVideoArmed = false;
+    _shutterFingerDown = false;
+    _pendingStopTap = false;
+    _lockDragProgress = 0;
     await _pauseGuideMusic();
     _maxRecordTimer?.cancel();
     _maxRecordTimer = null;
@@ -2139,7 +2163,10 @@ class _MinisIndependentCaptureScreenState
           }
         }
         final d = math.max(1, rawElapsed);
-        await _appendVideoSegment(path, d);
+        // Wall-clock from start/stop is authoritative for camera clips.
+        // Skip the slow re-probe loop (cost up to ~10s on short clips when
+        // file metadata reports the placeholder ~1s).
+        await _appendVideoSegment(path, d, durationAlreadyFinalized: true);
       } else {
         _toast('No video file from camera.');
       }
@@ -2252,18 +2279,16 @@ class _MinisIndependentCaptureScreenState
     if (_busy || _countingDown) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
-    // Already recording: this press is a tap-to-stop. Handle on pointer up
-    // so the user can briefly press the (stop-icon) shutter without arming
-    // the hold-to-record timer.
-    if (_recording) return;
+    // Already recording (hands-free locked): mark this press as tap-to-stop;
+    // actual stop fires on PointerUp so a quick press cancels cleanly.
+    if (_recording) {
+      _pendingStopTap = true;
+      return;
+    }
     if (_clipsTotalDurationMs >= _sessionCapMs) {
       _toast('Recording limit reached.');
       return;
     }
-    // Bug 8 fix: cancel any in-progress zoom gesture when the shutter goes
-    // down. Without this, a grip-shift during the 280ms hold window would
-    // continue moving zoom even though the preview Listener already ignores
-    // the same pointer after _shutterFingerDown becomes true.
     _zoomGesturePointer = null;
     _zoomBadgeTimer?.cancel();
     if (_zoomBadgeVisible && mounted) {
@@ -2273,34 +2298,76 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _shutterFingerDown = true;
     _holdVideoArmed = false;
+    _lockReadyToEngage = false;
+    _recordingLocked = false;
+    _lockDragProgress = 0;
+    _shutterPointerStartDx = event.localPosition.dx;
     _holdStartTimer = Timer(const Duration(milliseconds: 280), () {
       if (!mounted || !_shutterFingerDown) return;
       _holdVideoArmed = true;
-      // Recording is now armed and starting. Release the shutter-finger
-      // lock so the user can lift their finger (recording keeps running
-      // until they tap the stop button) and so zoom gestures on the
-      // preview work during recording.
-      _shutterFingerDown = false;
+      // Recording starts while finger is still down. Lock indicator is
+      // displayed; dragging finger upward past _kLockTriggerDistance engages
+      // hands-free lock so recording continues after release.
+      HapticFeedback.lightImpact();
       unawaited(_startRecordingInternal());
+      if (mounted) setState(() {});
     });
   }
 
-  void _onShutterPointerUpOrCancel() {
+  void _onShutterPointerMove(PointerMoveEvent event) {
+    if (!_shutterFingerDown) return;
+    if (!_holdVideoArmed || !_recording || _recordingLocked) return;
+    final dx = event.localPosition.dx - _shutterPointerStartDx;
+    final progress = (-dx / _kLockTriggerDistance).clamp(0.0, 1.0);
+    if (dx <= -_kLockTriggerDistance) {
+      _recordingLocked = true;
+      _shutterFingerDown = false;
+      _holdVideoArmed = false;
+      _lockReadyToEngage = false;
+      _lockDragProgress = 1.0;
+      HapticFeedback.mediumImpact();
+      if (mounted) setState(() {});
+      return;
+    }
+    final nowHot = dx <= -_kLockTriggerDistance * 0.55;
+    final progressChanged = (progress - _lockDragProgress).abs() > 0.02;
+    if (nowHot != _lockReadyToEngage || progressChanged) {
+      _lockReadyToEngage = nowHot;
+      _lockDragProgress = progress;
+      if (mounted) setState(() {});
+    }
+  }
+
+  void _onShutterPointerUpOrCancel({bool cancelled = false}) {
     _holdStartTimer?.cancel();
     _holdStartTimer = null;
     final wasHold = _holdVideoArmed;
     _shutterFingerDown = false;
     _holdVideoArmed = false;
-    if (wasHold) {
-      // Recording started via this hold and keeps running after release.
-      // The user stops it with a tap on the shutter (handled below).
+    final wasReadyHint = _lockReadyToEngage;
+    _lockReadyToEngage = false;
+    if (_pendingStopTap) {
+      _pendingStopTap = false;
+      if (!cancelled && _recording) {
+        unawaited(_stopRecordingInternal());
+      }
       return;
     }
-    if (_recording) {
-      // Tap-to-stop while recording is active.
+    if (_recordingLocked) {
+      // Lock-engage gesture release: keep recording running hands-free.
+      if (mounted && wasReadyHint) setState(() {});
+      return;
+    }
+    if (wasHold && _recording) {
+      // Hold-to-record release without lock: stop recording.
       unawaited(_stopRecordingInternal());
       return;
     }
+    if (_recording) {
+      unawaited(_stopRecordingInternal());
+      return;
+    }
+    if (cancelled) return;
     if (widget.videoOnly) {
       _toast('Video only — hold to record.');
       return;
@@ -2524,6 +2591,196 @@ class _MinisIndependentCaptureScreenState
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildRecordingStopIcon() {
+    return AnimatedBuilder(
+      animation: _recordPulseController,
+      builder: (context, child) {
+        final t = _recordPulseController.value;
+        final scale = 0.86 + 0.14 * t;
+        final glow = 0.35 + 0.45 * t;
+        return Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              width: _kShutterStopIconSize + 14,
+              height: _kShutterStopIconSize + 14,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.redAccent.withValues(alpha: glow * 0.55),
+                    blurRadius: 14 + 8 * t,
+                    spreadRadius: 1.5,
+                  ),
+                ],
+              ),
+            ),
+            Transform.scale(scale: scale, child: child),
+          ],
+        );
+      },
+      child: const PhosphorIcon(
+        PhosphorIconsRegular.stop,
+        color: Colors.redAccent,
+        size: _kShutterStopIconSize,
+      ),
+    );
+  }
+
+  Widget _buildLockTrail() {
+    final progress = _lockDragProgress.clamp(0.0, 1.0);
+    return Align(
+      alignment: Alignment.centerRight,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 70),
+        curve: Curves.easeOut,
+        width: 32 * progress,
+        height: 6,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.centerRight,
+            end: Alignment.centerLeft,
+            colors: [
+              Colors.redAccent,
+              Color(0x99FF5252),
+            ],
+          ),
+          borderRadius: BorderRadius.circular(4),
+          boxShadow: progress > 0.05
+              ? [
+                  BoxShadow(
+                    color: Colors.redAccent.withValues(alpha: 0.55),
+                    blurRadius: 10,
+                    spreadRadius: 1,
+                  ),
+                ]
+              : null,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLockHint() {
+    const pillSize = 46.0;
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutBack,
+      tween: Tween<double>(begin: 0.55, end: 1.0),
+      builder: (context, entryScale, child) {
+        return Transform.scale(scale: entryScale, child: child);
+      },
+      child: AnimatedBuilder(
+      animation: _lockPulseController,
+      builder: (context, _) {
+        final pulse = _lockPulseController.value;
+        final hot = _lockReadyToEngage;
+        final progress = _lockDragProgress.clamp(0.0, 1.0);
+        final basePulseScale =
+            1.0 + (hot ? 0.0 : 0.10 * math.sin(pulse * 2 * math.pi));
+        return SizedBox(
+          width: 96,
+          height: pillSize + 24,
+          child: Stack(
+            alignment: Alignment.center,
+            clipBehavior: Clip.none,
+            children: [
+              // Chevron hints drifting leftward — hides as user drags in.
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: Opacity(
+                  opacity: (1.0 - progress).clamp(0.0, 1.0) * 0.85,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(3, (i) {
+                      final phase = (pulse + i * 0.18) % 1.0;
+                      final fade = (math.sin(phase * math.pi)).clamp(0.0, 1.0);
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 1),
+                        child: Opacity(
+                          opacity: 0.25 + 0.6 * fade,
+                          child: Transform.translate(
+                            offset: Offset(-6 * phase, 0),
+                            child: const PhosphorIcon(
+                              PhosphorIconsRegular.caretLeft,
+                              color: Colors.white,
+                              size: 12,
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+              ),
+              // Pulsing halo behind pill.
+              Transform.scale(
+                scale: hot ? 1.18 : basePulseScale,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: pillSize + 10,
+                  height: pillSize + 10,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: (hot
+                            ? Colors.redAccent
+                            : Colors.white)
+                        .withValues(alpha: hot ? 0.30 : 0.12),
+                  ),
+                ),
+              ),
+              // Pill body.
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                width: pillSize,
+                height: pillSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: hot
+                      ? Colors.redAccent.withValues(alpha: 0.95)
+                      : Colors.black.withValues(alpha: 0.62),
+                  border: Border.all(
+                    color: Colors.white
+                        .withValues(alpha: hot ? 0.98 : 0.72),
+                    width: 1.6,
+                  ),
+                  boxShadow: hot
+                      ? [
+                          BoxShadow(
+                            color: Colors.redAccent.withValues(alpha: 0.55),
+                            blurRadius: 14,
+                            spreadRadius: 1,
+                          ),
+                        ]
+                      : null,
+                ),
+                alignment: Alignment.center,
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 160),
+                  transitionBuilder: (child, anim) => ScaleTransition(
+                    scale: anim,
+                    child: FadeTransition(opacity: anim, child: child),
+                  ),
+                  child: PhosphorIcon(
+                    hot
+                        ? PhosphorIconsRegular.lock
+                        : PhosphorIconsRegular.lockSimple,
+                    key: ValueKey<bool>(hot),
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
     );
   }
 
@@ -3055,11 +3312,15 @@ class _MinisIndependentCaptureScreenState
                                   ),
                                   Listener(
                                     onPointerDown: _onShutterPointerDown,
+                                    onPointerMove: _onShutterPointerMove,
                                     onPointerUp: (_) =>
                                         _onShutterPointerUpOrCancel(),
                                     onPointerCancel: (_) =>
-                                        _onShutterPointerUpOrCancel(),
-                                    child: Container(
+                                        _onShutterPointerUpOrCancel(
+                                            cancelled: true),
+                                    child: AnimatedContainer(
+                                      duration: const Duration(milliseconds: 220),
+                                      curve: Curves.easeOutCubic,
                                       width: _kShutterInner,
                                       height: _kShutterInner,
                                       decoration: BoxDecoration(
@@ -3071,14 +3332,35 @@ class _MinisIndependentCaptureScreenState
                                       ),
                                       alignment: Alignment.center,
                                       child: _recording
-                                          ? const PhosphorIcon(
-                                              PhosphorIconsRegular.stop,
-                                              color: Colors.redAccent,
-                                              size: _kShutterStopIconSize,
-                                            )
+                                          ? _buildRecordingStopIcon()
                                           : null,
                                     ),
                                   ),
+                                  if (_holdVideoArmed &&
+                                      _recording &&
+                                      !_recordingLocked)
+                                    Positioned(
+                                      left: -28,
+                                      top: (_kShutterOuter - 8) / 2,
+                                      width: 32,
+                                      height: 8,
+                                      child: IgnorePointer(
+                                        child: _buildLockTrail(),
+                                      ),
+                                    ),
+                                  if (_holdVideoArmed &&
+                                      _recording &&
+                                      !_recordingLocked)
+                                    Positioned(
+                                      left: -96,
+                                      top: 0,
+                                      bottom: 0,
+                                      child: IgnorePointer(
+                                        child: Center(
+                                          child: _buildLockHint(),
+                                        ),
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),
