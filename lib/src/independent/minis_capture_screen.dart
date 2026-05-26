@@ -12,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 
 import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
@@ -155,7 +156,8 @@ String _normalizeLocalPickerPath(String raw) {
 }
 
 class _MinisIndependentCaptureScreenState
-    extends State<MinisIndependentCaptureScreen> with TickerProviderStateMixin {
+    extends State<MinisIndependentCaptureScreen>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   static const double _kRailIconSize = 25;
   static const double _kCornerBtnSize = 48;
   static const double _kCornerIconSize = 22;
@@ -257,6 +259,14 @@ class _MinisIndependentCaptureScreenState
   @override
   void initState() {
     super.initState();
+    // Observe app lifecycle so locking the device / sending the app to the
+    // background stops an in-progress recording. Without this the camera
+    // preview pauses but the underlying recorder keeps capturing audio.
+    WidgetsBinding.instance.addObserver(this);
+    // Keep the screen awake on the capture surface so the display timeout
+    // doesn't lock the device mid-recording, which would pause the camera
+    // and abort the clip. Disabled in dispose.
+    unawaited(WakelockPlus.enable());
     _lockPulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1100),
@@ -515,6 +525,8 @@ class _MinisIndependentCaptureScreenState
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(WakelockPlus.disable());
     // Restore to all orientations when leaving capture.
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
 
@@ -530,6 +542,21 @@ class _MinisIndependentCaptureScreenState
       unawaited(_engine?.dispose());
     }
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Device lock / app backgrounded → finalize any active recording so the
+    // recorder (audio + video) is fully released. Without this the camera
+    // preview pauses on lock but the audio source keeps capturing.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      if (_recording) {
+        unawaited(_stopRecordingInternal());
+      }
+    }
   }
 
   void _toast(String msg) {
