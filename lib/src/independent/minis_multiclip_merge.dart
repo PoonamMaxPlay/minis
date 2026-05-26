@@ -71,6 +71,18 @@ Future<String> _copyToDocumentsIfIos(String cachePath) async {
   }
 }
 
+/// Returns the working directory for intermediate two-pass artifacts. On iOS
+/// we write directly to Documents to skip the tmp/Caches sanitize+copy dance.
+Future<Directory> _intermediateWorkDir() async {
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+  return getTemporaryDirectory();
+}
+
 /// Same platforms as [proVideoEditorRenderExportSupported] in hub (no web).
 bool minisMulticlipMergeSupported() {
   if (kIsWeb) return false;
@@ -84,6 +96,20 @@ bool _mergeCancelSupported() {
   return defaultTargetPlatform == TargetPlatform.android ||
       defaultTargetPlatform == TargetPlatform.iOS ||
       defaultTargetPlatform == TargetPlatform.macOS;
+}
+
+/// Music-tempo preservation requires a second render pass: pro_video_editor
+/// applies [playbackSpeed] to **every** track in the composition (iOS scales
+/// each `AVMutableCompositionTrack` time range; Android shares the speed
+/// audio processor with custom audio tracks in some pipeline paths). That
+/// pitches music up/down. To keep music at native tempo we render the
+/// speed-adjusted video first (without music), then mux music at speed 1.0
+/// over the result.
+bool _needsMusicTempoPass(double playbackSpeed, MinisMusicSegment? music) {
+  if (playbackSpeed == 1.0) return false;
+  final path = music?.path.trim();
+  if (path == null || path.isEmpty) return false;
+  return File(path).existsSync();
 }
 
 /// Probes merged file with video_player (debug) so logs match feed/reel [VideoAspectDiag].
@@ -100,6 +126,113 @@ void _logMergedVideoFileProbe(String outPath) {
       await c.dispose();
     }
   }());
+}
+
+VideoRenderData _buildSinglePassData({
+  required String id,
+  required List<String> safeClipPaths,
+  required double playbackSpeed,
+  required bool enableAudio,
+  required List<VideoAudioTrack> audioTracks,
+  required double? clipVolume,
+}) {
+  // Use the same quality path as hub export: plain [VideoRenderData] omits
+  // [qualityConfig]/bitrate and the encoder can fall back to a much lower
+  // output than the camera-captured clips.
+  // Explicit 1:1 scale skips [VideoRenderData.toAsyncMap]'s metadata-driven
+  // fit (getMetadata on first segment). That probe can throw METADATA_ERROR
+  // / setDataSource failures for some temp or gallery paths while export
+  // would still succeed with fixed scales + quality bitrate.
+  return VideoRenderData.withQualityPreset(
+    id: id,
+    videoSegments: safeClipPaths
+        .map(
+          (path) => VideoSegment(
+            video: EditorVideo.file(File(path)),
+            volume: clipVolume,
+          ),
+        )
+        .toList(),
+    qualityPreset: VideoQualityPreset.p1080High,
+    outputFormat: VideoOutputFormat.mp4,
+    playbackSpeed: playbackSpeed,
+    enableAudio: enableAudio,
+    audioTracks: audioTracks,
+    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
+  );
+}
+
+/// Pass 1 of the music-tempo preservation flow: bake the speed change into
+/// the video stream (and clip mic audio) with no music attached.
+VideoRenderData _buildPassOneData({
+  required String id,
+  required List<String> safeClipPaths,
+  required double playbackSpeed,
+  required bool enableAudio,
+}) {
+  return _buildSinglePassData(
+    id: id,
+    safeClipPaths: safeClipPaths,
+    playbackSpeed: playbackSpeed,
+    enableAudio: enableAudio,
+    audioTracks: const [],
+    clipVolume: null,
+  );
+}
+
+/// Pass 2: take the already-sped intermediate as the single segment, render
+/// at speed 1.0 with music attached so the music plays at its native tempo.
+/// Existing clip audio in the intermediate is ducked via [VideoSegment.volume].
+VideoRenderData _buildPassTwoData({
+  required String id,
+  required String passOnePath,
+  required bool enableAudio,
+  required MinisMusicSegment music,
+}) {
+  final clipVolume = enableAudio ? 0.35 : 0.0;
+  final track = VideoAudioTrack(
+    path: music.path,
+    volume: 1.0,
+    loop: true,
+    audioStartTime: Duration(milliseconds: music.startMs),
+    audioEndTime: Duration(milliseconds: music.endMs),
+  );
+  return VideoRenderData.withQualityPreset(
+    id: id,
+    videoSegments: [
+      VideoSegment(
+        video: EditorVideo.file(File(passOnePath)),
+        volume: clipVolume,
+      ),
+    ],
+    qualityPreset: VideoQualityPreset.p1080High,
+    outputFormat: VideoOutputFormat.mp4,
+    playbackSpeed: 1.0,
+    enableAudio: true,
+    audioTracks: [track],
+    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
+  );
+}
+
+/// Mutable holder so the cancel button can target whichever pass is running.
+class _ActiveTaskRef {
+  String? id;
+}
+
+/// Bridges per-pass native progress streams into a single 0..1 stream for
+/// the dialog / handoff overlay. Pass-1 occupies 0..0.5, pass-2 0.5..1.0;
+/// single-pass renders forward raw 0..1 unchanged.
+StreamSubscription<ProgressModel> _pipeProgress({
+  required String taskId,
+  required StreamController<double> sink,
+  required double offset,
+  required double scale,
+}) {
+  return ProVideoEditor.instance.progressStreamById(taskId).listen((snap) {
+    if (sink.isClosed) return;
+    final v = (offset + snap.progress * scale).clamp(0.0, 1.0);
+    sink.add(v);
+  });
 }
 
 /// Concatenate [clipPaths] with [playbackSpeed] and optional audio; shows progress.
@@ -143,66 +276,112 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
-  final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
+  final tempDir = await getTemporaryDirectory();
+  final outPath = p.join(tempDir.path, 'minis_reel_$id.mp4');
   final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
 
-  List<VideoAudioTrack> audioTracks = const [];
-  final seg = backgroundMusic;
-  final music = seg?.path.trim();
-  if (music != null && music.isNotEmpty) {
-    final audioFile = File(music);
-    if (!audioFile.existsSync()) {
-      if (context.mounted) {
-        showMinisToast(context, 'Music file not found: $music');
+  final twoPass = _needsMusicTempoPass(playbackSpeed, backgroundMusic);
+  final progressBus = StreamController<double>.broadcast();
+  final activeTask = _ActiveTaskRef();
+
+  Future<String?> runner() async {
+    if (!twoPass) {
+      // Single-pass path: music absent or speed == 1.0, no tempo conflict.
+      List<VideoAudioTrack> audioTracks = const [];
+      final seg = backgroundMusic;
+      final music = seg?.path.trim();
+      if (music != null && music.isNotEmpty) {
+        final audioFile = File(music);
+        if (!audioFile.existsSync()) {
+          if (context.mounted) {
+            showMinisToast(context, 'Music file not found: $music');
+          }
+        } else {
+          audioTracks = [
+            VideoAudioTrack(
+              path: music,
+              volume: 1.0,
+              loop: true,
+              audioStartTime: Duration(milliseconds: seg!.startMs),
+              audioEndTime: Duration(milliseconds: seg.endMs),
+            ),
+          ];
+        }
       }
-    } else {
-      audioTracks = [
-        VideoAudioTrack(
-          path: music,
-          volume: 1.0,
-          loop: true,
-          audioStartTime: Duration(milliseconds: seg!.startMs),
-          audioEndTime: Duration(milliseconds: seg.endMs),
-        ),
-      ];
+
+      final duckClipAudio = audioTracks.isNotEmpty;
+      final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+
+      final data = _buildSinglePassData(
+        id: id,
+        safeClipPaths: safeClipPaths,
+        playbackSpeed: playbackSpeed,
+        enableAudio: enableAudio,
+        audioTracks: audioTracks,
+        clipVolume: clipVolume,
+      );
+      activeTask.id = data.id;
+      final sub = _pipeProgress(
+        taskId: data.id, sink: progressBus, offset: 0.0, scale: 1.0,
+      );
+      try {
+        await ProVideoEditor.instance.renderVideoToFile(outPath, data);
+      } finally {
+        await sub.cancel();
+      }
+      return outPath;
     }
+
+    // Two-pass path: render speed-adjusted video first, then mux music at 1.0×.
+    final workDir = await _intermediateWorkDir();
+    final pass1Path = p.join(workDir.path, 'minis_pass1_$id.mp4');
+    final id1 = '${id}_p1';
+    final id2 = '${id}_p2';
+
+    final pass1Data = _buildPassOneData(
+      id: id1,
+      safeClipPaths: safeClipPaths,
+      playbackSpeed: playbackSpeed,
+      enableAudio: enableAudio,
+    );
+    activeTask.id = pass1Data.id;
+    final sub1 = _pipeProgress(
+      taskId: pass1Data.id, sink: progressBus, offset: 0.0, scale: 0.5,
+    );
+    try {
+      await ProVideoEditor.instance.renderVideoToFile(pass1Path, pass1Data);
+    } finally {
+      await sub1.cancel();
+    }
+
+    final pass2Data = _buildPassTwoData(
+      id: id2,
+      passOnePath: pass1Path,
+      enableAudio: enableAudio,
+      music: backgroundMusic!,
+    );
+    activeTask.id = pass2Data.id;
+    final sub2 = _pipeProgress(
+      taskId: pass2Data.id, sink: progressBus, offset: 0.5, scale: 0.5,
+    );
+    try {
+      await ProVideoEditor.instance.renderVideoToFile(outPath, pass2Data);
+    } finally {
+      await sub2.cancel();
+      try { await File(pass1Path).delete(); } catch (_) {}
+    }
+    return outPath;
   }
 
-  final duckClipAudio = audioTracks.isNotEmpty;
-  final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
-
-  // Use the same quality path as hub export: plain [VideoRenderData] omits
-  // [qualityConfig]/bitrate and the encoder can fall back to a much lower
-  // output than the camera-captured clips.
-  // Explicit 1:1 scale skips [VideoRenderData.toAsyncMap]'s metadata-driven
-  // fit (getMetadata on first segment). That probe can throw METADATA_ERROR
-  // / setDataSource failures for some temp or gallery paths while export
-  // would still succeed with fixed scales + quality bitrate.
-  final data = VideoRenderData.withQualityPreset(
-    id: id,
-    videoSegments: safeClipPaths
-        .map(
-          (path) => VideoSegment(
-            video: EditorVideo.file(File(path)),
-            volume: clipVolume,
-          ),
-        )
-        .toList(),
-    qualityPreset: VideoQualityPreset.p1080High,
-    outputFormat: VideoOutputFormat.mp4,
-    playbackSpeed: playbackSpeed,
-    enableAudio: enableAudio,
-    audioTracks: audioTracks,
-    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
-  );
-
-  final future = ProVideoEditor.instance.renderVideoToFile(outPath, data);
+  final future = runner();
   if (!context.mounted) {
     unawaited(
       future.then<void>(
         (_) {},
         onError: (_, __) {},
-      ),
+      ).whenComplete(() async {
+        try { await progressBus.close(); } catch (_) {}
+      }),
     );
     return null;
   }
@@ -211,29 +390,38 @@ Future<String?> mergeMinisVideoClipsWithDialog({
     context: context,
     barrierDismissible: false,
     builder: (dialogCtx) => _MinisClipMergeProgressDialog(
-      taskId: data.id,
+      progressStream: progressBus.stream,
       renderFuture: future,
       canCancel: _mergeCancelSupported(),
-      onCancel: () => ProVideoEditor.instance.cancel(data.id),
+      onCancel: () async {
+        final tid = activeTask.id;
+        if (tid != null) {
+          await ProVideoEditor.instance.cancel(tid);
+        }
+      },
     ),
   );
 
   try {
-    await future;
-    final finalPath = await _copyToDocumentsIfIos(outPath);
+    final result = await future;
+    if (result == null) return null;
+    final finalPath = await _copyToDocumentsIfIos(result);
     _logMergedVideoFileProbe(finalPath);
     return finalPath;
   } on RenderCanceledException {
     return null;
   } catch (e, st) {
     dev.log('minis merge failed: $e', error: e, stackTrace: st, name: 'MinisMerge');
-    if (clipPaths.length == 1) {
+    if (clipPaths.length == 1 && !twoPass) {
       dev.log('minis merge fallback to original clip', name: 'MinisMerge');
       return clipPaths.first;
     }
     rethrow;
+  } finally {
+    try { await progressBus.close(); } catch (_) {}
   }
 }
+
 /// Silent merge — no dialog. Use this when the caller already shows its own
 /// loading overlay (e.g. LoopIt's runWithMinisHandoffOverlay).
 /// Returns output path on success, or `null` on error.
@@ -257,63 +445,104 @@ Future<String?> mergeMinisVideoClipsSilent({
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
-  final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
+  final tempDir = await getTemporaryDirectory();
+  final outPath = p.join(tempDir.path, 'minis_reel_$id.mp4');
   final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
 
-  List<VideoAudioTrack> audioTracks = const [];
-  final seg = backgroundMusic;
-  final music = seg?.path.trim();
-  if (music != null && music.isNotEmpty && File(music).existsSync()) {
-    audioTracks = [
-      VideoAudioTrack(
-        path: music,
-        volume: 1.0,
-        loop: true,
-        audioStartTime: Duration(milliseconds: seg!.startMs),
-        audioEndTime: Duration(milliseconds: seg.endMs),
-      ),
-    ];
-  }
+  final twoPass = _needsMusicTempoPass(playbackSpeed, backgroundMusic);
 
-  final duckClipAudio = audioTracks.isNotEmpty;
-  final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
-
-  final data = VideoRenderData.withQualityPreset(
-    id: id,
-    videoSegments: safeClipPaths
-        .map((path) => VideoSegment(
-              video: EditorVideo.file(File(path)),
-              volume: clipVolume,
-            ))
-        .toList(),
-    qualityPreset: VideoQualityPreset.p1080High,
-    outputFormat: VideoOutputFormat.mp4,
-    playbackSpeed: playbackSpeed,
-    enableAudio: enableAudio,
-    audioTracks: audioTracks,
-    transform: const ExportTransform(scaleX: 1.0, scaleY: 1.0),
-  );
-
-  StreamSubscription? progressSub;
+  StreamSubscription<double>? overlaySub;
+  final progressBus = StreamController<double>.broadcast();
   if (MinisCaptureHost.hasHandoffOverlay) {
-    progressSub = ProVideoEditor.instance.progressStreamById(id).listen((snap) {
-      MinisCaptureHost.updateHandoffProgress(snap.progress);
+    overlaySub = progressBus.stream.listen((v) {
+      MinisCaptureHost.updateHandoffProgress(v);
     });
   }
 
+  Future<void> closeBus() async {
+    try { await overlaySub?.cancel(); } catch (_) {}
+    try { await progressBus.close(); } catch (_) {}
+  }
+
   try {
-    await ProVideoEditor.instance.renderVideoToFile(outPath, data);
-    await progressSub?.cancel();
+    if (!twoPass) {
+      List<VideoAudioTrack> audioTracks = const [];
+      final seg = backgroundMusic;
+      final music = seg?.path.trim();
+      if (music != null && music.isNotEmpty && File(music).existsSync()) {
+        audioTracks = [
+          VideoAudioTrack(
+            path: music,
+            volume: 1.0,
+            loop: true,
+            audioStartTime: Duration(milliseconds: seg!.startMs),
+            audioEndTime: Duration(milliseconds: seg.endMs),
+          ),
+        ];
+      }
+      final duckClipAudio = audioTracks.isNotEmpty;
+      final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+
+      final data = _buildSinglePassData(
+        id: id,
+        safeClipPaths: safeClipPaths,
+        playbackSpeed: playbackSpeed,
+        enableAudio: enableAudio,
+        audioTracks: audioTracks,
+        clipVolume: clipVolume,
+      );
+      final sub = _pipeProgress(
+        taskId: data.id, sink: progressBus, offset: 0.0, scale: 1.0,
+      );
+      try {
+        await ProVideoEditor.instance.renderVideoToFile(outPath, data);
+      } finally {
+        await sub.cancel();
+      }
+    } else {
+      final workDir = await _intermediateWorkDir();
+      final pass1Path = p.join(workDir.path, 'minis_pass1_$id.mp4');
+
+      final pass1Data = _buildPassOneData(
+        id: '${id}_p1',
+        safeClipPaths: safeClipPaths,
+        playbackSpeed: playbackSpeed,
+        enableAudio: enableAudio,
+      );
+      final sub1 = _pipeProgress(
+        taskId: pass1Data.id, sink: progressBus, offset: 0.0, scale: 0.5,
+      );
+      try {
+        await ProVideoEditor.instance.renderVideoToFile(pass1Path, pass1Data);
+      } finally {
+        await sub1.cancel();
+      }
+
+      final pass2Data = _buildPassTwoData(
+        id: '${id}_p2',
+        passOnePath: pass1Path,
+        enableAudio: enableAudio,
+        music: backgroundMusic!,
+      );
+      final sub2 = _pipeProgress(
+        taskId: pass2Data.id, sink: progressBus, offset: 0.5, scale: 0.5,
+      );
+      try {
+        await ProVideoEditor.instance.renderVideoToFile(outPath, pass2Data);
+      } finally {
+        await sub2.cancel();
+        try { await File(pass1Path).delete(); } catch (_) {}
+      }
+    }
+
     final finalPath = await _copyToDocumentsIfIos(outPath);
     _logMergedVideoFileProbe(finalPath);
     return finalPath;
   } on RenderCanceledException {
-    await progressSub?.cancel();
     return null;
   } catch (e, st) {
-    await progressSub?.cancel();
     dev.log('minis merge silent failed: $e', error: e, stackTrace: st, name: 'MinisMerge');
-    if (clipPaths.length == 1) {
+    if (clipPaths.length == 1 && !twoPass) {
       dev.log('minis merge silent fallback to original clip', name: 'MinisMerge');
       return clipPaths.first;
     }
@@ -321,20 +550,22 @@ Future<String?> mergeMinisVideoClipsSilent({
       MinisCaptureHost.reportHandoffError(minisUserFriendlyException(e));
     }
     rethrow;
+  } finally {
+    await closeBus();
   }
 }
 
 
 class _MinisClipMergeProgressDialog extends StatefulWidget {
   const _MinisClipMergeProgressDialog({
-    required this.taskId,
+    required this.progressStream,
     required this.renderFuture,
     required this.canCancel,
     required this.onCancel,
   });
 
-  final String taskId;
-  final Future<void> renderFuture;
+  final Stream<double> progressStream;
+  final Future<String?> renderFuture;
   final bool canCancel;
   final Future<void> Function() onCancel;
 
@@ -386,10 +617,10 @@ class _MinisClipMergeProgressDialogState
         'Merging clips',
         style: TextStyle(color: Colors.white),
       ),
-      content: StreamBuilder<ProgressModel>(
-        stream: ProVideoEditor.instance.progressStreamById(widget.taskId),
+      content: StreamBuilder<double>(
+        stream: widget.progressStream,
         builder: (context, snap) {
-          double? nativeProgress = snap.data?.progress;
+          double? nativeProgress = snap.data;
 
           if (nativeProgress != null && nativeProgress > 0.01) {
             // Native stream is working correctly, stop simulation.
