@@ -520,6 +520,7 @@ class _MinisIndependentCaptureScreenState
         endMs: endMs,
       );
     });
+    await _autoMuteMicForMusic();
     await _prepareGuideMusic();
   }
 
@@ -919,6 +920,7 @@ class _MinisIndependentCaptureScreenState
     );
     segment = await _persistMusicSegment(segment);
     setState(() => _musicSegment = segment);
+    await _autoMuteMicForMusic();
     await _prepareGuideMusic();
     _toast('Music ready - long-press Sounds to clear');
     return true;
@@ -969,6 +971,7 @@ class _MinisIndependentCaptureScreenState
         if (segment == null) return;
         segment = await _persistMusicSegment(segment);
         setState(() => _musicSegment = segment);
+        await _autoMuteMicForMusic();
         await _prepareGuideMusic();
         _toast('Music section updated - long-press Sounds to clear');
         return;
@@ -1008,6 +1011,7 @@ class _MinisIndependentCaptureScreenState
       if (segment == null) return;
       segment = await _persistMusicSegment(segment);
       setState(() => _musicSegment = segment);
+      await _autoMuteMicForMusic();
       await _prepareGuideMusic();
       _toast('Music ready - long-press Sounds to clear');
     } catch (e) {
@@ -1953,6 +1957,7 @@ class _MinisIndependentCaptureScreenState
         allowReelTrim: minisReelClipTrimmerPlatformSupported(),
         confirmOnClose: true,
         initialTotalDurationMs: durationForPreview,
+        musicSegment: _musicSegment,
       );
       if (!mounted) return;
       if (preview == null || preview.path.isEmpty) {
@@ -2059,6 +2064,12 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null) return;
     final next = !_micEnabled;
+    // Block unmute attempts while music is active to prevent double-audio
+    // (mic capturing the speaker-played music guide track).
+    if (next && _musicSegment != null) {
+      _toast('Microphone is muted while music is active.');
+      return;
+    }
     _applyBusy(true, message: 'Updating microphone…');
     try {
       await eng.setRecordWithAudio(next);
@@ -2069,6 +2080,33 @@ class _MinisIndependentCaptureScreenState
       if (mounted) {
         _applyBusy(false);
       }
+    }
+  }
+
+  /// Auto-mute the mic when music is selected so the recorder does not capture
+  /// the speaker-played music guide alongside ambient noise, which would later
+  /// double up against the pure music track at merge/preview time.
+  ///
+  /// Wrapped in [_applyBusy] because `setRecordWithAudio` tears down and
+  /// re-initializes the [CameraController]; without hiding the preview the
+  /// in-flight `CameraPreview` widget can still reference the disposed
+  /// controller and throw "buildPreview() was called on a disposed
+  /// CameraController" mid-reinit.
+  Future<void> _autoMuteMicForMusic() async {
+    if (!_micEnabled) return;
+    final eng = _engine;
+    if (eng == null) {
+      if (mounted) setState(() => _micEnabled = false);
+      return;
+    }
+    _applyBusy(true, message: 'Muting microphone for music…');
+    try {
+      await eng.setRecordWithAudio(false);
+      if (mounted) setState(() => _micEnabled = false);
+    } catch (e) {
+      debugPrint('minis: auto-mute mic for music failed: $e');
+    } finally {
+      if (mounted) _applyBusy(false);
     }
   }
 

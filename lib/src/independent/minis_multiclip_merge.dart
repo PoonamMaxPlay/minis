@@ -189,7 +189,9 @@ VideoRenderData _buildPassTwoData({
   required bool enableAudio,
   required MinisMusicSegment music,
 }) {
-  final clipVolume = enableAudio ? 0.35 : 0.0;
+  // Music is always present in pass 2 — drop intermediate clip audio entirely
+  // so the recorded mic track does not double up against the pure music track.
+  const clipVolume = 0.0;
   final track = VideoAudioTrack(
     path: music.path,
     volume: 1.0,
@@ -309,14 +311,18 @@ Future<String?> mergeMinisVideoClipsWithDialog({
         }
       }
 
-      final duckClipAudio = audioTracks.isNotEmpty;
-      final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+      final dropClipAudio = audioTracks.isNotEmpty;
+      // When music is selected, drop the original clip audio entirely so the
+      // recorded mic track (which may include the music guide bleeding through
+      // the speaker) does not double up against the pure music track. Keep
+      // enableAudio=true so the music audioTrack still renders.
+      final clipVolume = dropClipAudio ? 0.0 : null;
 
       final data = _buildSinglePassData(
         id: id,
         safeClipPaths: safeClipPaths,
         playbackSpeed: playbackSpeed,
-        enableAudio: enableAudio,
+        enableAudio: dropClipAudio ? true : enableAudio,
         audioTracks: audioTracks,
         clipVolume: clipVolume,
       );
@@ -480,14 +486,16 @@ Future<String?> mergeMinisVideoClipsSilent({
           ),
         ];
       }
-      final duckClipAudio = audioTracks.isNotEmpty;
-      final clipVolume = duckClipAudio ? (enableAudio ? 0.35 : 0.0) : null;
+      final dropClipAudio = audioTracks.isNotEmpty;
+      // See note in mergeMinisVideoClipsWithDialog: drop clip audio when music
+      // is present so only the pure music track renders.
+      final clipVolume = dropClipAudio ? 0.0 : null;
 
       final data = _buildSinglePassData(
         id: id,
         safeClipPaths: safeClipPaths,
         playbackSpeed: playbackSpeed,
-        enableAudio: enableAudio,
+        enableAudio: dropClipAudio ? true : enableAudio,
         audioTracks: audioTracks,
         clipVolume: clipVolume,
       );

@@ -42,6 +42,7 @@ class MinisPreviewPlayer(
         methodChannel.setMethodCallHandler(this)
         @Suppress("UNCHECKED_CAST")
         paths = creationParams?.get("paths") as? List<String> ?: emptyList()
+        val mute = creationParams?.get("mute") as? Boolean ?: false
 
         try {
             player = ExoPlayer.Builder(context).build().apply {
@@ -50,6 +51,7 @@ class MinisPreviewPlayer(
                 setMediaItems(mediaItems)
                 repeatMode = Player.REPEAT_MODE_ALL
                 addListener(this@MinisPreviewPlayer)
+                if (mute) volume = 0f
                 prepare()
                 playWhenReady = true
             }

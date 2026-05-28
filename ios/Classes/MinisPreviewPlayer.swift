@@ -49,7 +49,8 @@ public class MinisPreviewPlayer: NSObject, FlutterPlatformView {
     private var player: AVQueuePlayer?
     private var playerLooper: AVPlayerLooper?
     private let channel: FlutterMethodChannel
-    
+    private var mute: Bool = false
+
     // Store original durations
     private var totalDurationMs: Int = 0
     private var videoSize: CGSize = .zero
@@ -73,8 +74,11 @@ public class MinisPreviewPlayer: NSObject, FlutterPlatformView {
             self?.handleMethodCall(call, result: result)
         }
         
-        if let argsDict = args as? [String: Any], let paths = argsDict["paths"] as? [String] {
-            setupPlayer(paths: paths)
+        if let argsDict = args as? [String: Any] {
+            self.mute = (argsDict["mute"] as? Bool) ?? false
+            if let paths = argsDict["paths"] as? [String] {
+                setupPlayer(paths: paths)
+            }
         }
     }
     
@@ -149,7 +153,11 @@ public class MinisPreviewPlayer: NSObject, FlutterPlatformView {
                 self.playerLayer.player = queuePlayer
                 self.playerLayer.videoGravity = .resizeAspect
                 self.player = queuePlayer
-                
+                if self.mute {
+                    queuePlayer.volume = 0
+                    queuePlayer.isMuted = true
+                }
+
                 queuePlayer.play()
             }
         }

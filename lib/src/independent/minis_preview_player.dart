@@ -7,18 +7,23 @@ import 'package:flutter/services.dart';
 
 class MinisPreviewPlayerController extends ChangeNotifier {
   final List<String> paths;
+  /// When true the native player force-mutes the clip audio track.
+  /// Used by the post-recording preview to silence the original recorded
+  /// audio when a music segment is active (the pure music is played by
+  /// the music guide / merged-output instead).
+  final bool mute;
   MethodChannel? _channel;
-  
+
   bool isInitialized = false;
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
   bool isPlaying = true;
   Size? videoSize;
-  
+
   Timer? _positionTimer;
   bool _disposed = false;
 
-  MinisPreviewPlayerController(this.paths);
+  MinisPreviewPlayerController(this.paths, {this.mute = false});
 
   void _onPlatformViewCreated(int id) async {
     _channel = MethodChannel('minis_preview_player_$id');
@@ -115,6 +120,7 @@ class MinisPreviewPlayerWidget extends StatelessWidget {
     const String viewType = 'minis_preview_player';
     final Map<String, dynamic> creationParams = <String, dynamic>{
       'paths': controller.paths,
+      'mute': controller.mute,
     };
 
     Widget playerView;
