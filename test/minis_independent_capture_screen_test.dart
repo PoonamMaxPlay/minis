@@ -40,7 +40,7 @@ void main() {
   });
 }
 
-class _FakeEngine implements MinisCameraEnginePort {
+class _FakeEngine extends MinisCameraEnginePort {
   @override
   bool isInitialized = false;
 

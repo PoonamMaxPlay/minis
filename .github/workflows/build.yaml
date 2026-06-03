@@ -1,0 +1,238 @@
+name: Plugin build matrix
+
+# Validates that the loopit_minis plugin builds end-to-end on both platforms
+# and that no forbidden pub dependency creeps back into pubspec.lock.
+#
+# FFmpeg artefacts produced by .github/workflows/ffmpeg-build.yml are cached
+# here keyed by the hash of every build_*.sh + the toolchain version, so the
+# slow cross-build only re-runs when the build pipeline itself changes.
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  FLUTTER_VERSION: '3.27.0'
+  NDK_VERSION: '26.1.10909125'
+  XCODE_VERSION: '16.0'
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # Lockfile guard — fails the PR if a forbidden pub dep reappears.    #
+  # ------------------------------------------------------------------ #
+  lockfile-guard:
+    name: Forbidden dep guard
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan pubspec.lock files
+        run: |
+          set -euo pipefail
+          # Every package killed during improvements 1–5. Any of these
+          # reappearing in pubspec.lock means a regression.
+          FORBIDDEN=(
+            camera
+            camera_android_camerax
+            camera_avfoundation
+            camera_platform_interface
+            camera_web
+            pro_image_editor
+            emoji_picker_flutter
+            pro_video_editor
+            video_trimmer
+            video_compress
+            video_thumbnail
+            audio_waveforms
+            audio_session
+            image_picker
+            file_picker
+            video_player
+            path_provider
+            permission_handler
+            device_info_plus
+            wakelock_plus
+            phosphor_flutter
+          )
+          fail=0
+          for lock in pubspec.lock example/pubspec.lock; do
+            [ -f "$lock" ] || continue
+            echo "→ $lock"
+            for pkg in "${FORBIDDEN[@]}"; do
+              if grep -E "^  ${pkg}:" "$lock" >/dev/null 2>&1; then
+                echo "::error file=$lock::Forbidden dependency '$pkg' is back in $lock"
+                fail=1
+              fi
+            done
+          done
+          # Also enforce that `path` is not a direct dep (transitive via flutter is fine).
+          if grep -E '^  path:\s*\^' pubspec.yaml >/dev/null 2>&1; then
+            echo "::error file=pubspec.yaml::Direct dep on 'path' must stay deleted"
+            fail=1
+          fi
+          exit $fail
+
+  # ------------------------------------------------------------------ #
+  # Android build matrix.                                              #
+  # ------------------------------------------------------------------ #
+  android:
+    name: Android (${{ matrix.abi }})
+    runs-on: ubuntu-22.04
+    needs: lockfile-guard
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+          local-cache: true
+
+      - name: Compute FFmpeg cache key
+        id: ffmpeg-key
+        run: |
+          KEY=$(find android/ffmpeg -type f \( -name '*.sh' -o -name 'Dockerfile' \) -print0 \
+                  | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          echo "key=ffmpeg-android-${{ matrix.abi }}-ndk${{ env.NDK_VERSION }}-${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore FFmpeg .so cache
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: android/src/main/jniLibs/${{ matrix.abi }}
+          key: ${{ steps.ffmpeg-key.outputs.key }}
+
+      - name: Download FFmpeg artefact (cache miss)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: ffmpeg-build.yml
+          name: jniLibs-${{ matrix.abi }}
+          path: android/src/main/jniLibs/${{ matrix.abi }}
+          if_no_artifact_found: warn
+
+      - name: pub get
+        run: |
+          flutter --version
+          flutter pub get
+          (cd example && flutter pub get)
+
+      - name: dart analyze
+        run: |
+          flutter analyze lib test
+          (cd example && flutter analyze lib)
+
+      - name: assembleDebug
+        working-directory: example/android
+        run: ./gradlew :app:assembleDebug -PtargetAbi=${{ matrix.abi }}
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: minis-example-${{ matrix.abi }}.apk
+          path: example/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------------ #
+  # iOS build.                                                         #
+  # ------------------------------------------------------------------ #
+  ios:
+    name: iOS xcframework + example
+    runs-on: macos-15
+    needs: lockfile-guard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        run: sudo xcode-select -s /Applications/Xcode_${{ env.XCODE_VERSION }}.app
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Compute FFmpeg cache key
+        id: ffmpeg-key
+        run: |
+          KEY=$(find ios/ffmpeg -type f -name '*.sh' -print0 \
+                  | sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
+          XCODE_BUILD=$(xcodebuild -version | tr '\n' '-' | tr -d ' ')
+          echo "key=ffmpeg-ios-${XCODE_BUILD}-${KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore FFmpeg xcframework cache
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ios/Frameworks/FFmpeg.xcframework
+          key: ${{ steps.ffmpeg-key.outputs.key }}
+
+      - name: Download FFmpeg artefact (cache miss)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: ffmpeg-build.yml
+          name: FFmpeg-xcframework
+          path: ios/Frameworks/FFmpeg.xcframework
+          if_no_artifact_found: warn
+
+      - name: pub get + pod install
+        run: |
+          flutter pub get
+          (cd example && flutter pub get)
+          (cd example/ios && pod install --repo-update)
+
+      - name: dart analyze
+        run: |
+          flutter analyze lib test
+          (cd example && flutter analyze lib)
+
+      - name: xcodebuild (Runner, simulator, no codesign)
+        working-directory: example/ios
+        run: |
+          xcodebuild \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | xcbeautify --renderer github-actions
+
+  # ------------------------------------------------------------------ #
+  # Unit tests.                                                        #
+  # ------------------------------------------------------------------ #
+  unit-tests:
+    name: flutter test
+    runs-on: ubuntu-22.04
+    needs: lockfile-guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter test --reporter expanded

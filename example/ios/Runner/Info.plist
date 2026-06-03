@@ -51,7 +51,15 @@
 	<string>Minis needs microphone access to record audio with video.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Minis needs access to your library to pick photos and videos.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save edited media to your library.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Tag photos with location.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Tag photos with location.</string>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>Minis may access music files you choose for your clips.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Transcribe captions on-device.</string>
 </dict>
 </plist>

@@ -1,0 +1,14 @@
+# ninja log v5
+0	101	1780465114592022152	CMakeFiles/minis_camera_pipeline.dir/camera_pipeline.cpp.o	5a48dabe4de1151a
+1	124	1780465114611514113	CMakeFiles/minis_imgedit.dir/imgedit/egl_context.cpp.o	a238975d3a3bb486
+102	176	1780465114665085910	/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/Debug/6h262v25/obj/arm64-v8a/libminis_camera_pipeline.so	b8c106b63fe88fd9
+2	211	1780465114700632593	CMakeFiles/minis_audio_aaudio.dir/audio/aaudio_capture.cpp.o	f9f46f05dcbb2f3c
+211	270	1780465114760383068	/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/Debug/6h262v25/obj/arm64-v8a/libminis_audio_aaudio.so	e3ec3f4ca06baf37
+1	331	1780465114820824675	CMakeFiles/minis_imgedit.dir/imgedit/crop.cpp.o	3d021359ee396e4c
+1	444	1780465114933904362	CMakeFiles/minis_imgedit.dir/imgedit/heal.cpp.o	c5c7b4889ad6bae0
+1	465	1780465114954647042	CMakeFiles/minis_imgedit.dir/imgedit/render_graph.cpp.o	6b9b468b36db1602
+1	509	1780465114997920041	CMakeFiles/minis_imgedit.dir/imgedit/liquify.cpp.o	a9b44f86c76d4d33
+1	514	1780465115003158462	CMakeFiles/minis_imgedit.dir/imgedit/jni_bridge.cpp.o	3cdef40e6dd929a0
+1	548	1780465115036433500	CMakeFiles/minis_imgedit.dir/imgedit/lut.cpp.o	c5c1f2a3a28f7470
+1	584	1780465115071880890	CMakeFiles/minis_imgedit.dir/imgedit/pipeline.cpp.o	e6e0ff85da55cac2
+584	622	1780465115111634859	/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/Debug/6h262v25/obj/arm64-v8a/libminis_imgedit.so	dde4985ae821441

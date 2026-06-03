@@ -1,8 +1,7 @@
 import 'dart:io';
 
 import 'package:get/get.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+import 'package:loopit_minis/loopit_minis.dart';
 
 /// Persists a capture (photo or video) into app documents for the standalone
 /// example (no host app).
@@ -12,14 +11,15 @@ final class MinisExampleSave {
   static Future<String?> copyIntoLibrary(String sourcePath) async {
     final src = File(sourcePath);
     if (!await src.exists()) return null;
-    final dir = await getApplicationDocumentsDirectory();
-    final sub = Directory(p.join(dir.path, 'minis_captures'));
+    final dirPath = await NativePaths.documentsDir();
+    if (dirPath == null) return null;
+    final sub = Directory(NativePaths.join([dirPath, 'minis_captures']));
     if (!await sub.exists()) {
       await sub.create(recursive: true);
     }
-    final ext = p.extension(sourcePath).isEmpty ? '' : p.extension(sourcePath);
+    final ext = NativePaths.extension(sourcePath);
     final name = 'capture_${DateTime.now().millisecondsSinceEpoch}$ext';
-    final dest = File(p.join(sub.path, name));
+    final dest = File(NativePaths.join([sub.path, name]));
     await src.copy(dest.path);
     return dest.path;
   }

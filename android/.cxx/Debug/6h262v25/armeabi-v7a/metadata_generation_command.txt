@@ -1,0 +1,20 @@
+                        -H/Volumes/KRYPTIX/test/minis/android/src/main/cpp
+-DCMAKE_SYSTEM_NAME=Android
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+-DCMAKE_SYSTEM_VERSION=26
+-DANDROID_PLATFORM=android-26
+-DANDROID_ABI=armeabi-v7a
+-DCMAKE_ANDROID_ARCH_ABI=armeabi-v7a
+-DANDROID_NDK=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973
+-DCMAKE_ANDROID_NDK=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973
+-DCMAKE_TOOLCHAIN_FILE=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/build/cmake/android.toolchain.cmake
+-DCMAKE_MAKE_PROGRAM=/Volumes/KRYPTIX/AndroidStudio/SDK/cmake/3.22.1/bin/ninja
+-DCMAKE_CXX_FLAGS=-std=c++17 -fexceptions -frtti
+-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/Debug/6h262v25/obj/armeabi-v7a
+-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/Debug/6h262v25/obj/armeabi-v7a
+-DCMAKE_BUILD_TYPE=Debug
+-B/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a
+-GNinja
+-DANDROID_STL=c++_shared
+                        Build command args: []
+                        Version: 2

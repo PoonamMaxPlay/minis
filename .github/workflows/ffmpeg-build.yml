@@ -1,0 +1,115 @@
+name: FFmpeg cross-build
+
+# Produces the platform-specific FFmpeg artefacts that flip
+# `MinisVidEdit.getCapabilities().engineAvailable` from false to true:
+#   - Android: android/src/main/jniLibs/<abi>/lib*.so   (4 ABIs)
+#   - iOS:     ios/Frameworks/FFmpeg.xcframework         (3 slices merged)
+#
+# The build is slow (~30 minutes per ABI / slice the first time). Once it
+# succeeds the artefacts are uploaded and can be downloaded into a local
+# checkout to skip the next cross-build.
+
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - 'android/ffmpeg/**'
+      - 'ios/ffmpeg/**'
+      - '.github/workflows/ffmpeg-build.yml'
+
+jobs:
+  android:
+    name: Android FFmpeg (${{ matrix.abi }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc
+          df -h
+      - name: Set up Docker buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build container
+        run: docker build -t loopit/minis-ffmpeg android/ffmpeg/docker
+      - name: Cross-build FFmpeg
+        run: |
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w /workspace/android/ffmpeg \
+            -e ABIS="${{ matrix.abi }}" \
+            loopit/minis-ffmpeg ./build_android.sh
+      - name: Verify symbols
+        run: |
+          for so in android/src/main/jniLibs/${{ matrix.abi }}/lib*.so; do
+            echo "→ $so"
+            file "$so"
+            nm "$so" 2>/dev/null | grep -E 'avformat_open_input|avcodec_send_packet|sws_scale' | head -3 || true
+          done
+      - name: Upload .so artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jniLibs-${{ matrix.abi }}
+          path: android/src/main/jniLibs/${{ matrix.abi }}/
+          if-no-files-found: error
+
+  ios:
+    name: iOS FFmpeg xcframework
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          brew install autoconf automake libtool pkg-config yasm nasm cmake ninja
+      - name: Clone FFmpeg + deps
+        run: |
+          mkdir -p ios/ffmpeg/external
+          cd ios/ffmpeg/external
+          git clone --depth 1 --branch n6.1 https://github.com/FFmpeg/FFmpeg.git ffmpeg
+          git clone --depth 1 https://code.videolan.org/videolan/x264.git x264
+          git clone --depth 1 --branch 3.5 https://bitbucket.org/multicoreware/x265_git.git x265
+          git clone --depth 1 --branch v2.0.2 https://github.com/mstorsjo/fdk-aac.git fdk-aac
+          git clone --depth 1 --branch v1.4 https://github.com/xiph/opus.git opus
+          git clone --depth 1 --branch v1.13.1 https://chromium.googlesource.com/webm/libvpx libvpx
+      - name: Build all iOS slices
+        run: |
+          cd ios/ffmpeg
+          chmod +x ./build_ios.sh
+          ./build_ios.sh
+      - name: Verify framework
+        run: |
+          ls -la ios/Frameworks/FFmpeg.xcframework
+          plutil -p ios/Frameworks/FFmpeg.xcframework/Info.plist
+      - name: Upload xcframework
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFmpeg-xcframework
+          path: ios/Frameworks/FFmpeg.xcframework/
+          if-no-files-found: error
+
+  package:
+    name: Bundle artefacts
+    needs: [android, ios]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: Repack into single zip
+        run: |
+          mkdir -p out/android/src/main/jniLibs
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            mkdir -p out/android/src/main/jniLibs/$abi
+            cp -R artefacts/jniLibs-$abi/* out/android/src/main/jniLibs/$abi/
+          done
+          mkdir -p out/ios/Frameworks
+          cp -R artefacts/FFmpeg-xcframework out/ios/Frameworks/FFmpeg.xcframework
+          (cd out && tar -czf ../minis-ffmpeg.tar.gz .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minis-ffmpeg-bundle
+          path: minis-ffmpeg.tar.gz
+          if-no-files-found: error

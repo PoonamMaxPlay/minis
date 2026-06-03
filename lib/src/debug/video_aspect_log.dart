@@ -1,7 +1,7 @@
 import 'dart:developer' as dev;
 
 import 'package:flutter/foundation.dart';
-import 'package:video_player/video_player.dart';
+import 'package:loopit_minis/src/sys/video_player_shim.dart';
 
 /// Same fields as LoopIt [logVideoAspectDiag] for comparing merge output vs playback.
 void logMinisVideoAspectDiag(String layer, VideoPlayerValue value,

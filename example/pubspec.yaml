@@ -26,13 +26,14 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   get: ^4.7.2
-  path: ^1.9.1
-  path_provider: ^2.1.5
+  shared_preferences: ^2.3.2
   loopit_minis:
     path: ../
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to

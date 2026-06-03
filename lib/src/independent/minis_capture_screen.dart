@@ -2,21 +2,20 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:audio_waveforms/audio_waveforms.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:audio_session/audio_session.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:video_thumbnail/video_thumbnail.dart';
+import 'package:loopit_minis/src/audio/minis_audio_player.dart';
+import 'package:loopit_minis/src/audio/minis_audio_session.dart';
+import 'package:loopit_minis/src/sys/paths.dart';
+import 'package:loopit_minis/src/sys/permissions.dart';
+import 'package:loopit_minis/src/sys/picker.dart';
+import 'package:loopit_minis/src/sys/wakelock.dart';
 
-import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
+import 'package:loopit_minis/src/videdit/videdit_engine.dart';
+import 'package:loopit_minis/src/videdit/videdit_types.dart';
 import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
+import 'package:loopit_minis/src/independent/minis_native_permissions.dart';
 import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
@@ -26,14 +25,12 @@ import 'package:loopit_minis/src/independent/minis_music_trim_sheet.dart';
 import 'package:loopit_minis/src/independent/minis_recording_clip.dart';
 import 'package:loopit_minis/src/independent/minis_recording_ring_painter.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
-import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
 import 'package:loopit_minis/src/minis_handoff.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
 
 /// Countdown before a **photo** is taken (self-timer). Video uses press-and-hold.
 enum MinisRecordCountdownMode {
@@ -48,7 +45,7 @@ enum MinisRecordCountdownMode {
 }
 
 /// Full-screen Minis-style capture using only [MinisCameraEnginePort] (default:
-/// [CameraPluginMinisEngine], no Retrytech).
+/// [NativeAndroidMinisCameraEngine], no Retrytech).
 ///
 /// **Hold** the shutter to start recording video — once recording is armed
 /// you can release; recording continues until you **tap** the shutter (now
@@ -82,7 +79,7 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
     this.useNativeAndroidCamera = false,
   });
 
-  /// If null, a [CameraPluginMinisEngine] is created and disposed by this
+  /// If null, a [NativeAndroidMinisCameraEngine] is created and disposed by this
   /// widget. If you pass a custom engine, you must dispose it yourself when
   /// not using the default lifecycle (this widget only disposes engines it creates).
   final MinisCameraEnginePort? engine;
@@ -114,7 +111,7 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
   /// allowed. Story and feed flows pass `false` so photo + video both work.
   final bool videoOnly;
 
-  /// Selects preview/capture resolution for the default [CameraPluginMinisEngine].
+  /// Selects preview/capture resolution for the default native engine.
   /// Ignored when [engine] is provided. Defaults to device heuristics ([auto]).
   final MinisCameraPerformanceMode cameraPerformanceMode;
 
@@ -128,16 +125,16 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
       _MinisIndependentCaptureScreenState();
 }
 
-bool _pickedXFileIsVideo(XFile x) {
-  final mt = x.mimeType?.toLowerCase();
-  if (mt != null) {
+bool _pickedPathIsVideo(String path, {String? mime}) {
+  final mt = mime?.toLowerCase();
+  if (mt != null && mt.isNotEmpty) {
     if (mt.startsWith('video/')) return true;
     if (mt.startsWith('image/')) return false;
   }
-  final path = x.path.toLowerCase();
+  final p = path.toLowerCase();
   const v = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.3gp', '.avi', '.flv', '.wmv'];
   for (final ext in v) {
-    if (path.endsWith(ext)) return true;
+    if (p.endsWith(ext)) return true;
   }
   return false;
 }
@@ -266,7 +263,7 @@ class _MinisIndependentCaptureScreenState
     // Keep the screen awake on the capture surface so the display timeout
     // doesn't lock the device mid-recording, which would pause the camera
     // and abort the clip. Disabled in dispose.
-    unawaited(WakelockPlus.enable());
+    unawaited(NativeWakelock.enable());
     _lockPulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1100),
@@ -324,9 +321,9 @@ class _MinisIndependentCaptureScreenState
     if (_webUnsupported) return;
 
     if (widget.permissionPolicy == MinisCapturePermissionPolicy.request) {
-      final cam = await Permission.camera.request();
-      final mic = await Permission.microphone.request();
-      if (!cam.isGranted || !mic.isGranted) {
+      final camGranted = await MinisNativePermissions.requestCamera();
+      final micGranted = await MinisNativePermissions.requestMicrophone();
+      if (!camGranted || !micGranted) {
         if (mounted) {
           setState(() {
             _permissionDenied = true;
@@ -527,7 +524,7 @@ class _MinisIndependentCaptureScreenState
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    unawaited(WakelockPlus.disable());
+    unawaited(NativeWakelock.disable());
     // Restore to all orientations when leaving capture.
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
 
@@ -824,70 +821,12 @@ class _MinisIndependentCaptureScreenState
     return 'Record or add a clip to finish';
   }
 
-  /// Resolves [PlatformFile] to a path the trim sheet and encoder can open.
-  ///
-  /// Uses the picker path when the file exists; otherwise copies from
-  /// [PlatformFile.readStream] (when [FilePicker.pickFiles] used
-  /// `withReadStream: true`) or from [PlatformFile.bytes].
-  Future<String?> _materializePickedAudioForTrim(PlatformFile file) async {
-    final path = file.path;
-    if (path != null && path.isNotEmpty) {
-      try {
-        if (await File(path).exists()) {
-          return path.replaceAll('\\', '/');
-        }
-      } catch (_) {}
-    }
-    final stream = file.readStream;
-    if (stream != null) {
-      try {
-        final dir = await getTemporaryDirectory();
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? file.extension!
-            : 'm4a';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_pick_${DateTime.now().microsecondsSinceEpoch}.$ext',
-          ),
-        );
-        final sink = dest.openWrite();
-        try {
-          await for (final chunk in stream) {
-            sink.add(chunk);
-          }
-        } finally {
-          await sink.close();
-        }
-        if (!await dest.exists() || await dest.length() == 0) {
-          return null;
-        }
-        return dest.absolute.path.replaceAll('\\', '/');
-      } catch (e) {
-        debugPrint('minis: audio stream copy failed: $e');
-        return null;
-      }
-    }
-    final bytes = file.bytes;
-    if (bytes != null && bytes.isNotEmpty) {
-      try {
-        final dir = await getTemporaryDirectory();
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? file.extension!
-            : 'm4a';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_pick_${DateTime.now().microsecondsSinceEpoch}.$ext',
-          ),
-        );
-        await dest.writeAsBytes(bytes, flush: true);
-        return dest.absolute.path.replaceAll('\\', '/');
-      } catch (e) {
-        debugPrint('minis: audio bytes write failed: $e');
-        return null;
-      }
-    }
+  Future<String?> _normalizePickedFilePath(String? path) async {
+    if (path == null || path.isEmpty) return null;
+    try {
+      final n = path.replaceAll('\\', '/');
+      if (await File(n).exists()) return n;
+    } catch (_) {}
     return null;
   }
 
@@ -931,11 +870,13 @@ class _MinisIndependentCaptureScreenState
   Future<MinisMusicSegment> _persistMusicSegment(MinisMusicSegment seg) async {
     final src = File(seg.path);
     if (!await src.exists()) return seg;
-    final dir = await getApplicationDocumentsDirectory();
-    final musicDir = Directory(p.join(dir.path, 'minis_music'));
+    final dirPath = await NativePaths.documentsDir();
+    if (dirPath == null) return seg;
+    final musicDir = Directory(NativePaths.join([dirPath, 'minis_music']));
     if (!await musicDir.exists()) await musicDir.create(recursive: true);
-    final ext = p.extension(seg.path).isNotEmpty ? p.extension(seg.path) : '.m4a';
-    final dest = p.join(musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext');
+    final extRaw = NativePaths.extension(seg.path);
+    final ext = extRaw.isNotEmpty ? extRaw : '.m4a';
+    final dest = NativePaths.join([musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext']);
     await src.copy(dest);
     
     // Proactively clean up the old file
@@ -977,26 +918,20 @@ class _MinisIndependentCaptureScreenState
         return;
       }
 
-      final r = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: kMinisAudioFileExtensions,
-        dialogTitle: 'Choose audio',
-        withReadStream: true,
+      final r = await NativePicker.pickFile(
+        multi: false,
+        extensions: kMinisAudioFileExtensions,
       );
-      final file = r?.files.single;
       if (!mounted) return;
-      if (file == null) return;
-      final path = await _materializePickedAudioForTrim(file);
+      if (r.isEmpty) return;
+      final file = r.first;
+      final path = await _normalizePickedFilePath(file.path);
       if (!mounted) return;
       if (path == null || path.isEmpty) {
         _toast('Could not read that audio file. Try another one.');
         return;
       }
-      final extFromPicker = file.extension?.toLowerCase();
-      final extFromPath = p.extension(path).toLowerCase().replaceFirst('.', '');
-      final ext = (extFromPicker != null && extFromPicker.isNotEmpty)
-          ? extFromPicker
-          : extFromPath;
+      final ext = NativePaths.extension(path).toLowerCase().replaceFirst('.', '');
       if (!kMinisAudioFileExtensions.contains(ext)) {
         _toast('Please choose an audio file.');
         return;
@@ -1063,16 +998,17 @@ class _MinisIndependentCaptureScreenState
         'tail=${sourcePath.length > 80 ? sourcePath.substring(sourcePath.length - 80) : sourcePath}',
       );
       if (!exists) return null;
-      final base = await getApplicationDocumentsDirectory();
-      final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+      final basePath = await NativePaths.documentsDir();
+      if (basePath == null) return null;
+      final dir = Directory(NativePaths.join([basePath, 'loopit_minis_captures']));
       if (!await dir.exists()) await dir.create(recursive: true);
-      final ext = p.extension(sourcePath).toLowerCase();
+      final ext = NativePaths.extension(sourcePath).toLowerCase();
       final safe = (ext.isNotEmpty && ext.length <= 8) ? ext : '.mp4';
       final dest = File(
-        p.join(
+        NativePaths.join([
           dir.path,
           'minis_gallery_in_${DateTime.now().microsecondsSinceEpoch}$safe',
-        ),
+        ]),
       );
       
       // Try an atomic rename (move) first. It's instant. The picker gives us a
@@ -1094,7 +1030,7 @@ class _MinisIndependentCaptureScreenState
       }
       
       final out = dest.path.replaceAll('\\', '/');
-      _logGallery('materialize OK out=${p.basename(out)}');
+      _logGallery('materialize OK out=${NativePaths.basename(out)}');
       return out;
     } catch (e) {
       _logGallery('materialize failed: $e');
@@ -1102,131 +1038,19 @@ class _MinisIndependentCaptureScreenState
     }
   }
 
-  /// When [FilePicker] returns no filesystem path (or path is invalid), copy bytes/stream.
-  Future<String?> _materializePlatformFileAsGallerySource(PlatformFile file) async {
-    _logGallery(
-      'platformFile name=${file.name} size=${file.size} pathNull=${file.path == null} ext=${file.extension}',
-    );
-    final path = file.path;
-    if (path != null && path.isNotEmpty) {
-      try {
-        final n = _normalizeLocalPickerPath(path);
-        final ok = await File(n).exists();
-        _logGallery('platformFile path normalizedExists=$ok');
-        if (ok) return n;
-      } catch (e) {
-        _logGallery('platformFile path error: $e');
-      }
-    }
-    final stream = file.readStream;
-    if (stream != null) {
-      try {
-        final base = await getApplicationDocumentsDirectory();
-        final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
-        if (!await dir.exists()) await dir.create(recursive: true);
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? '.${file.extension!}'
-            : '.mp4';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_gallery_pick_${DateTime.now().microsecondsSinceEpoch}$ext',
-          ),
-        );
-        final sink = dest.openWrite();
-        try {
-          await for (final chunk in stream) {
-            sink.add(chunk);
-          }
-        } finally {
-          await sink.close();
-        }
-        if (!await dest.exists() || await dest.length() == 0) {
-          _logGallery('stream copy empty or missing');
-          return null;
-        }
-        _logGallery('stream copy OK ${p.basename(dest.path)}');
-        return dest.path;
-      } catch (e) {
-        _logGallery('stream copy failed: $e');
-        return null;
-      }
-    }
-    final bytes = file.bytes;
-    if (bytes != null && bytes.isNotEmpty) {
-      try {
-        final base = await getApplicationDocumentsDirectory();
-        final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
-        if (!await dir.exists()) await dir.create(recursive: true);
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? '.${file.extension!}'
-            : '.mp4';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_gallery_pick_${DateTime.now().microsecondsSinceEpoch}$ext',
-          ),
-        );
-        await dest.writeAsBytes(bytes, flush: true);
-        _logGallery('bytes copy OK ${p.basename(dest.path)}');
-        return dest.path;
-      } catch (e) {
-        _logGallery('bytes write failed: $e');
-        return null;
-      }
-    }
-    _logGallery('platformFile no path/stream/bytes');
-    return null;
-  }
-
-  /// Resolves a [PlatformFile] from [FilePicker] to a local path [File] can open.
-  Future<String?> _resolveLocalPathFromPlatformFile(PlatformFile f) async {
-    final rawPath = f.path;
-    String? src;
-    if (rawPath != null && rawPath.isNotEmpty) {
-      src = _normalizeLocalPickerPath(rawPath);
-      _logGallery('resolvePlatformFile raw pathLen=${rawPath.length}');
-      try {
-        final ex = await File(src).exists();
-        _logGallery('resolvePlatformFile normalized exists=$ex');
-        if (!ex) src = null;
-      } catch (e) {
-        _logGallery('resolvePlatformFile File.exists error: $e');
-        src = null;
-      }
-    } else {
-      _logGallery('resolvePlatformFile no path — stream/bytes');
-    }
-    src ??= await _materializePlatformFileAsGallerySource(f);
-    if (src == null || src.isEmpty) return null;
-    _logGallery(
-      'resolvePlatformFile tail=${src.length > 80 ? src.substring(src.length - 80) : src}',
-    );
-    return src;
-  }
-
-  /// Story / feed-style Minis (**!videoOnly**): [pickMedia] hangs or returns null on
-  /// many Android devices; [FileType.media] matches photos + videos in one picker.
-  ///
-  /// Returns `true` if the flow finished here (success, cancel, or handled error).
-  /// Returns `false` to fall back to [ImagePicker] (rare plugin failure).
+  /// Story / feed-style Minis (**!videoOnly**): mixed photos+videos in one picker.
+  /// Returns `true` if the flow finished here.
   Future<bool> _openGalleryMixedMediaViaFilePicker() async {
-    _logGallery('FilePicker(FileType.media) story/mixed');
+    _logGallery('NativePicker.pickMedia story/mixed');
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.media,
-        allowMultiple: false,
-        withReadStream: defaultTargetPlatform == TargetPlatform.android,
-      );
-      _logGallery(
-        'FilePicker media back null=${result == null} count=${result?.files.length ?? 0}',
-      );
-      if (result == null || result.files.isEmpty) {
-        _logGallery('FilePicker media cancel or empty');
+      final items = await NativePicker.pickMedia(multi: false, types: const ['image', 'video']);
+      _logGallery('NativePicker media count=${items.length}');
+      if (items.isEmpty) {
+        _logGallery('NativePicker media cancel or empty');
         return true;
       }
-      final f = result.files.single;
-      final path = await _resolveLocalPathFromPlatformFile(f);
+      final f = items.first;
+      final path = await _normalizePickedFilePath(f.path);
       if (path == null || path.isEmpty) {
         _logGallery('mixed pick could not resolve path');
         _toast('Could not read the selected file.');
@@ -1234,10 +1058,10 @@ class _MinisIndependentCaptureScreenState
       }
       if (!mounted) return true;
 
-      final isVideo = _pickedXFileIsVideo(XFile(path, name: f.name));
-      _logGallery('mixed pick isVideo=$isVideo file=${p.basename(path)}');
+      final isVideo = _pickedPathIsVideo(path, mime: f.mime);
+      _logGallery('mixed pick isVideo=$isVideo file=${NativePaths.basename(path)}');
       _logMulticlip(
-        'picked path=${p.basename(path)} isVideo=$isVideo mime=(filePicker)',
+        'picked path=${NativePaths.basename(path)} isVideo=$isVideo mime=${f.mime}',
       );
 
       if (!isVideo) {
@@ -1254,40 +1078,29 @@ class _MinisIndependentCaptureScreenState
       await _importPickedGalleryVideoFromSourcePath(path);
       return true;
     } catch (e, st) {
-      _logGallery('FilePicker media error: $e\n$st');
+      _logGallery('NativePicker media error: $e\n$st');
       return false;
     }
   }
 
-  /// Minis / reels (**videoOnly**): use native file/video document picker. On many
-  /// Android devices [ImagePicker.pickVideo] returns `null` even after the user
-  /// picks a clip (Photo Picker / OEM quirks); [FilePicker] is reliable here.
+  /// Reels (**videoOnly**): native video picker.
   Future<void> _openGalleryVideoViaFilePicker() async {
-    _logGallery('FilePicker(FileType.video) starting');
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.video,
-      allowMultiple: false,
-      // Android often omits [PlatformFile.path] for SAF URIs — stream still works.
-      withReadStream: defaultTargetPlatform == TargetPlatform.android,
-    );
-    _logGallery(
-      'FilePicker back null=${result == null} count=${result?.files.length ?? 0}',
-    );
-    if (result == null || result.files.isEmpty) {
-      _logGallery('FilePicker cancel or empty');
+    _logGallery('NativePicker.pickVideo starting');
+    final picked = await NativePicker.pickVideo();
+    _logGallery('NativePicker.pickVideo back null=${picked == null}');
+    if (picked == null) {
+      _logGallery('NativePicker.pickVideo cancel');
       return;
     }
-    final f = result.files.single;
-    final src = await _resolveLocalPathFromPlatformFile(f);
+    final src = await _normalizePickedFilePath(picked.path);
     if (src == null || src.isEmpty) {
-      _logGallery('no source after FilePicker');
+      _logGallery('no source after NativePicker.pickVideo');
       _toast('Could not read the selected file.');
       return;
     }
-    
-    // STRICT VERIFICATION: Reject if not identified as video
-    if (!_pickedXFileIsVideo(XFile(src, name: f.name))) {
-      _logGallery('FilePicker returned non-video, REJECTING');
+
+    if (!_pickedPathIsVideo(src, mime: picked.mime)) {
+      _logGallery('NativePicker returned non-video, REJECTING');
       await _showVideoOnlyImageDialog();
       return;
     }
@@ -1296,7 +1109,7 @@ class _MinisIndependentCaptureScreenState
   }
 
   Future<void> _importPickedGalleryVideoFromSourcePath(String sourcePath) async {
-    if (!_pickedXFileIsVideo(XFile(sourcePath))) {
+    if (!_pickedPathIsVideo(sourcePath)) {
       _logGallery('importPickedGalleryVideo: REJECTED non-video path');
       await _showVideoOnlyImageDialog();
       return;
@@ -1330,16 +1143,16 @@ class _MinisIndependentCaptureScreenState
       _toast('Could not read the selected video file.');
       return;
     }
-    _logMulticlip('materialized to=${p.basename(materialized)}');
+    _logMulticlip('materialized to=${NativePaths.basename(materialized)}');
     _logGallery(
-      'materialized ${p.basename(materialized)} len=${materialized.length}',
+      'materialized ${NativePaths.basename(materialized)} len=${materialized.length}',
     );
 
     if (!minisMulticlipMergeSupported()) {
       _logGallery('single-clip → openMinisVideoPreview');
       final preview = await openMinisVideoPreview(context, materialized);
       _logGallery(
-        'preview back null=${preview == null} path=${preview?.path != null ? p.basename(preview!.path) : 'n/a'}',
+        'preview back null=${preview == null} path=${preview?.path != null ? NativePaths.basename(preview!.path) : 'n/a'}',
       );
       if (!mounted) {
         _logGallery('preview ABORT not mounted');
@@ -1494,7 +1307,7 @@ class _MinisIndependentCaptureScreenState
     }
     if (preview != null && preview.path.isNotEmpty) {
       _logMulticlip(
-        'preview confirmed path=${p.basename(preview.path)} '
+        'preview confirmed path=${NativePaths.basename(preview.path)} '
         'durationMs=${preview.durationMs} '
         '(may differ if user trimmed in preview)',
       );
@@ -1547,18 +1360,23 @@ class _MinisIndependentCaptureScreenState
     times.add(400);
     times.add(0);
 
+    // Phase 1: thumbnails come from the native VidEdit engine; returns null
+    // when the engine is not built into this binary so the caller falls back
+    // to a placeholder tile.
+    if (!MinisVidEdit.instance.isAvailableSync) return null;
     for (final tMs in times) {
       try {
-        final b = await VideoThumbnail.thumbnailData(
-          video: filePath,
-          imageFormat: ImageFormat.JPEG,
-          maxWidth: 480,
-          quality: 88,
-          timeMs: tMs,
+        final b = await MinisVidEdit.instance.thumbnailAt(
+          path: filePath,
+          atMs: tMs,
+          width: 480,
+          height: 480,
         );
         if (b != null && b.isNotEmpty) {
           return b;
         }
+      } on VidEditUnsupportedError {
+        return null;
       } catch (_) {}
     }
     return null;
@@ -1578,7 +1396,7 @@ class _MinisIndependentCaptureScreenState
     bool durationAlreadyFinalized = false,
   }) async {
     _logMulticlip(
-      '_appendVideoSegment enter path=${p.basename(filePath)} durationMs=$durationMs '
+      '_appendVideoSegment enter path=${NativePaths.basename(filePath)} durationMs=$durationMs '
       'trustPreview=$trustGalleryPreviewDuration finalized=$durationAlreadyFinalized',
     );
     int useMs;
@@ -1700,7 +1518,7 @@ class _MinisIndependentCaptureScreenState
     int? previewDurationMs,
   }) async {
     _logMulticlip(
-      '_appendGalleryVideoAfterPreview enter confirmed=${p.basename(confirmedPath)} '
+      '_appendGalleryVideoAfterPreview enter confirmed=${NativePaths.basename(confirmedPath)} '
       'mergeSupported=${minisMulticlipMergeSupported()} '
       'previewDurationMs=$previewDurationMs',
     );
@@ -1739,7 +1557,7 @@ class _MinisIndependentCaptureScreenState
       
       _logMulticlip(
         'duration after preview finalize: clipMs=$clipMs reported=$reported '
-        'path=${p.basename(confirmedPath)}',
+        'path=${NativePaths.basename(confirmedPath)}',
       );
       final used = _clipsTotalDurationMs;
       final cap = _sessionCapMs;
@@ -1820,45 +1638,23 @@ class _MinisIndependentCaptureScreenState
         }
       }
 
-      final picker = ImagePicker();
-      XFile? x;
-
+      PickedItem? x;
       try {
-        _logGallery('picker selection starting videoOnly=${widget.videoOnly}');
+        _logGallery('NativePicker selection starting videoOnly=${widget.videoOnly}');
         if (widget.videoOnly) {
-          x = await picker.pickVideo(source: ImageSource.gallery);
+          x = await NativePicker.pickVideo();
         } else {
-          // pickMedia is available on newer plugin versions
-          x = await picker.pickMedia();
+          final items = await NativePicker.pickMedia(multi: false);
+          if (items.isNotEmpty) x = items.first;
         }
-        _logGallery('picker done null=${x == null}');
+        _logGallery('NativePicker done null=${x == null}');
       } catch (e1) {
-        _logMulticlip('primary picker failed ($e1) — trying fallbacks');
-        try {
-          x = await picker.pickVideo(source: ImageSource.gallery);
-        } catch (e2) {
-          if (widget.videoOnly) {
-            _logMulticlip('videoOnly=true, pickVideo failed, ABORTING');
-            if (mounted) _toast(minisUserFriendlyException(e2));
-            return;
-          }
-          _logMulticlip('pickVideo failed, trying pickImage');
-          try {
-            x = await picker.pickImage(
-              source: ImageSource.gallery,
-              imageQuality: 92,
-            );
-          } catch (e3) {
-            _logMulticlip('picker fully failed: $e1 / $e2 / $e3');
-            if (mounted) {
-              _toast(minisUserFriendlyException(e3));
-            }
-            return;
-          }
-        }
+        _logMulticlip('NativePicker failed ($e1)');
+        if (mounted) _toast(minisUserFriendlyException(e1));
+        return;
       }
       if (x == null) {
-        _logGallery('ImagePicker result null (cancel or empty)');
+        _logGallery('NativePicker result null (cancel or empty)');
         _logMulticlip('picker returned null (user cancelled)');
         return;
       }
@@ -1867,7 +1663,7 @@ class _MinisIndependentCaptureScreenState
         _logMulticlip('ABORT after pick: not mounted');
         return;
       }
-      _logGallery('picked raw pathLen=${x.path.length} mime=${x.mimeType}');
+      _logGallery('picked raw pathLen=${x.path.length} mime=${x.mime}');
       final path = _normalizeLocalPickerPath(x.path);
       if (path.isEmpty) {
         _logGallery('normalized path empty');
@@ -1876,9 +1672,7 @@ class _MinisIndependentCaptureScreenState
         }
         return;
       }
-      final isVideo = _pickedXFileIsVideo(
-        XFile(path, mimeType: x.mimeType, name: x.name),
-      );
+      final isVideo = _pickedPathIsVideo(path, mime: x.mime);
       if (isVideo) {
         _logGallery('picked video — importing');
         await _importPickedGalleryVideoFromSourcePath(path);
@@ -2039,15 +1833,16 @@ class _MinisIndependentCaptureScreenState
 
   Future<void> _persistCaptureFallback(String sourcePath) async {
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      final sub = Directory(p.join(dir.path, 'minis_captures'));
+      final dirPath = await NativePaths.documentsDir();
+      if (dirPath == null) return;
+      final sub = Directory(NativePaths.join([dirPath, 'minis_captures']));
       if (!await sub.exists()) {
         await sub.create(recursive: true);
       }
-      final ext = p.extension(sourcePath);
+      final ext = NativePaths.extension(sourcePath);
       final name =
           'minis_${DateTime.now().millisecondsSinceEpoch}${ext.isEmpty ? '' : ext}';
-      final dest = File(p.join(sub.path, name));
+      final dest = File(NativePaths.join([sub.path, name]));
       await File(sourcePath).copy(dest.path);
       if (mounted) {
         _toast('Saved to ${dest.path}');
@@ -2207,18 +2002,20 @@ class _MinisIndependentCaptureScreenState
         if (defaultTargetPlatform == TargetPlatform.iOS &&
             rawPath.contains('/tmp/')) {
           try {
-            final base = await getApplicationDocumentsDirectory();
+            final basePath = await NativePaths.documentsDir();
+            if (basePath == null) {
+              throw StateError('documents dir unavailable');
+            }
             final dir =
-                Directory(p.join(base.path, 'loopit_minis_captures'));
+                Directory(NativePaths.join([basePath, 'loopit_minis_captures']));
             if (!await dir.exists()) await dir.create(recursive: true);
-            final ext = p.extension(rawPath);
-            final dest = p.join(
+            final ext = NativePaths.extension(rawPath);
+            final dest = NativePaths.join([
               dir.path,
               'minis_cam_${DateTime.now().microsecondsSinceEpoch}$ext',
-            );
+            ]);
             await File(rawPath).copy(dest);
             path = dest;
-            // Clean up tmp file after copy.
             try {
               await File(rawPath).delete();
             } catch (_) {}
@@ -2599,7 +2396,7 @@ class _MinisIndependentCaptureScreenState
                 SizedBox(
                   height: _kRailIconSlotHeight,
                   child: Center(
-                    child: PhosphorIcon(
+                    child: Icon(
                       icon,
                       color: iconColor ?? Colors.white,
                       size: _kRailIconSize,
@@ -2638,10 +2435,10 @@ class _MinisIndependentCaptureScreenState
                 SizedBox(
                   height: _kRailIconSlotHeight,
                   child: Center(
-                    child: PhosphorIcon(
+                    child: Icon(
                       _railExpanded
-                          ? PhosphorIconsRegular.caretUp
-                          : PhosphorIconsRegular.caretDown,
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
                       color: Colors.white,
                       size: _kRailChevronSize,
                     ),
@@ -2687,8 +2484,8 @@ class _MinisIndependentCaptureScreenState
           ],
         );
       },
-      child: const PhosphorIcon(
-        PhosphorIconsRegular.stop,
+      child: const Icon(
+        Icons.stop,
         color: Colors.redAccent,
         size: _kShutterStopIconSize,
       ),
@@ -2770,8 +2567,8 @@ class _MinisIndependentCaptureScreenState
                           opacity: 0.25 + 0.6 * fade,
                           child: Transform.translate(
                             offset: Offset(-6 * phase, 0),
-                            child: const PhosphorIcon(
-                              PhosphorIconsRegular.caretLeft,
+                            child: const Icon(
+                              Icons.chevron_left,
                               color: Colors.white,
                               size: 12,
                             ),
@@ -2831,10 +2628,10 @@ class _MinisIndependentCaptureScreenState
                     scale: anim,
                     child: FadeTransition(opacity: anim, child: child),
                   ),
-                  child: PhosphorIcon(
+                  child: Icon(
                     hot
-                        ? PhosphorIconsRegular.lock
-                        : PhosphorIconsRegular.lockSimple,
+                        ? Icons.lock
+                        : Icons.lock_outline,
                     key: ValueKey<bool>(hot),
                     color: Colors.white,
                     size: 20,
@@ -2866,7 +2663,7 @@ class _MinisIndependentCaptureScreenState
         child: SizedBox(
           width: _kCornerBtnSize,
           height: _kCornerBtnSize,
-          child: PhosphorIcon(
+          child: Icon(
             icon,
             color: onPressed == null
                 ? Colors.white.withValues(alpha: 0.35)
@@ -2914,7 +2711,7 @@ class _MinisIndependentCaptureScreenState
                 const SizedBox(height: 20),
                 FilledButton(
                   onPressed: () async {
-                    await openAppSettings();
+                    await NativePermissions.openSettings();
                   },
                   child: const Text('Open settings'),
                 ),
@@ -2967,6 +2764,12 @@ class _MinisIndependentCaptureScreenState
         fit: StackFit.expand,
         clipBehavior: Clip.hardEdge,
         children: [
+          if (eng == null && _busy && !kIsWeb &&
+              (defaultTargetPlatform == TargetPlatform.android ||
+                  defaultTargetPlatform == TargetPlatform.iOS))
+            const Positioned.fill(
+              child: _MinisBootPreviewMount(),
+            ),
           if (eng != null && !_busy)
             Positioned.fill(child: eng.buildPreview(context)),
           if (_busy)
@@ -3076,8 +2879,8 @@ class _MinisIndependentCaptureScreenState
                           nav.pop();
                         }
                       },
-                      icon: const PhosphorIcon(
-                        PhosphorIconsRegular.caretLeft,
+                      icon: const Icon(
+                        Icons.chevron_left,
                         color: Colors.white,
                         size: _kAppBarIconSize,
                       ),
@@ -3097,8 +2900,8 @@ class _MinisIndependentCaptureScreenState
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              PhosphorIcon(
-                                PhosphorIconsRegular.videoCamera,
+                              Icon(
+                                Icons.videocam,
                                 color: Colors.white,
                                 size: _kStatusPillIconSize,
                               ),
@@ -3181,14 +2984,14 @@ class _MinisIndependentCaptureScreenState
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _railAction(
-                    icon: PhosphorIconsRegular.cameraRotate,
+                    icon: Icons.flip_camera_ios,
                     label: 'Flip',
                     onTap:
                         (_busy || _recording || _countingDown) ? null : _flip,
                   ),
                   if (_railExpanded) ...[
                     _railAction(
-                      icon: PhosphorIconsRegular.musicNotes,
+                      icon: Icons.music_note,
                       label: _musicSegment == null ? 'Sounds' : 'Music',
                       subtitle: _musicSegment != null ? 'Long-press: clear' : null,
                       iconColor: _musicSegment != null
@@ -3205,7 +3008,7 @@ class _MinisIndependentCaptureScreenState
                           : () => unawaited(_clearMusic()),
                     ),
                     _railAction(
-                      icon: PhosphorIconsRegular.gauge,
+                      icon: Icons.speed,
                       label: _speedRailLabel,
                       onTap: (_busy || _recording || _countingDown)
                           ? null
@@ -3213,7 +3016,7 @@ class _MinisIndependentCaptureScreenState
                     ),
                     if (!widget.videoOnly)
                       _railAction(
-                        icon: PhosphorIconsRegular.timer,
+                        icon: Icons.timer,
                         label: _timerRailLabel,
                         onTap: (_busy || _recording || _countingDown)
                             ? null
@@ -3222,8 +3025,8 @@ class _MinisIndependentCaptureScreenState
                   ],
                   _railAction(
                     icon: eng?.isTorchOn == true
-                        ? PhosphorIconsRegular.lightning
-                        : PhosphorIconsRegular.lightningSlash,
+                        ? Icons.flash_on
+                        : Icons.flash_off,
                     label: 'Flash',
                     onTap: (_busy || _recording || _countingDown)
                         ? null
@@ -3231,8 +3034,8 @@ class _MinisIndependentCaptureScreenState
                   ),
                   _railAction(
                     icon: _micEnabled
-                        ? PhosphorIconsRegular.microphone
-                        : PhosphorIconsRegular.microphoneSlash,
+                        ? Icons.mic
+                        : Icons.mic_off,
                     label: 'Mic',
                     onTap: (_busy || _recording || _countingDown)
                         ? null
@@ -3298,7 +3101,7 @@ class _MinisIndependentCaptureScreenState
                           // show undo (delete) when a clip exists so user can re-capture.
                           child: _videoClips.isNotEmpty
                               ? _roundSecondaryButton(
-                                  icon: PhosphorIconsRegular.arrowUUpLeft,
+                                  icon: Icons.undo,
                                   onPressed: (_busy ||
                                           _recording ||
                                           _countingDown)
@@ -3308,7 +3111,7 @@ class _MinisIndependentCaptureScreenState
                                           ),
                                 )
                               : _roundSecondaryButton(
-                                  icon: PhosphorIconsRegular.images,
+                                  icon: Icons.photo_library,
                                   onPressed: (_busy ||
                                           _recording ||
                                           _countingDown)
@@ -3460,7 +3263,7 @@ class _MinisIndependentCaptureScreenState
                                   ),
                                 ),
                             _roundSecondaryButton(
-                              icon: PhosphorIconsRegular.check,
+                              icon: Icons.check,
                               filled: _canConfirmClip,
                               onPressed: _canConfirmClip
                                   ? () => unawaited(_confirmClip())
@@ -3493,5 +3296,23 @@ class _MinisIndependentCaptureScreenState
         ],
       ),
     );
+  }
+}
+
+/// Mounts the native camera PlatformView during the boot phase so the Kotlin /
+/// Swift side has a `PreviewView` (or `AVCaptureVideoPreviewLayer`) attached
+/// before `bind` is invoked. Without this the bind call races the widget tree
+/// and fails with `NO_PREVIEW`.
+class _MinisBootPreviewMount extends StatelessWidget {
+  const _MinisBootPreviewMount();
+
+  static const String _viewType = 'minis_native_camera';
+
+  @override
+  Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return const UiKitView(viewType: _viewType);
+    }
+    return const AndroidView(viewType: _viewType);
   }
 }

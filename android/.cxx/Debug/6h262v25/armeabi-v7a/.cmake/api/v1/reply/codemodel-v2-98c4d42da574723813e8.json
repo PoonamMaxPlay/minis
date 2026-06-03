@@ -1,0 +1,78 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "minis_native",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "minis_audio_aaudio::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-minis_audio_aaudio-Debug-96c2ca408bb10c4c5d7b.json",
+					"name" : "minis_audio_aaudio",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "minis_camera_pipeline::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-minis_camera_pipeline-Debug-97445717ae0dedadde42.json",
+					"name" : "minis_camera_pipeline",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "minis_imgedit::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-minis_imgedit-Debug-b0484131ed753619de89.json",
+					"name" : "minis_imgedit",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a",
+		"source" : "/Volumes/KRYPTIX/test/minis/android/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

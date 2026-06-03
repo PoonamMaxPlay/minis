@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'package:path/path.dart' as p;
 
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
+import 'package:loopit_minis/src/sys/paths.dart';
+import 'package:loopit_minis/src/sys/video_player_shim.dart';
 import 'package:loopit_minis/src/independent/minis_preview_player.dart';
 
 import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
@@ -152,7 +152,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   }
 
   bool _isPathImage(String path) {
-    final ext = p.extension(path).toLowerCase();
+    final ext = NativePaths.extension(path).toLowerCase();
     return ext == '.jpg' || ext == '.jpeg' || ext == '.png' || ext == '.webp';
   }
 

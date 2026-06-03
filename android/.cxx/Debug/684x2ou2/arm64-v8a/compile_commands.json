@@ -1,0 +1,47 @@
+[
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_camera_pipeline_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_camera_pipeline.dir/camera_pipeline.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/camera_pipeline.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/camera_pipeline.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/egl_context.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/egl_context.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/egl_context.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/render_graph.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/render_graph.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/render_graph.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/pipeline.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/pipeline.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/pipeline.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/lut.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/lut.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/lut.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/heal.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/heal.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/heal.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/liquify.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/liquify.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/liquify.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/crop.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/crop.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/crop.cpp"
+},
+{
+  "directory": "/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a",
+  "command": "/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang++ --target=aarch64-none-linux-android21 --sysroot=/Volumes/KRYPTIX/AndroidStudio/SDK/ndk/27.0.12077973/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dminis_imgedit_EXPORTS -I/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fexceptions -frtti -fno-limit-debug-info  -fPIC -std=gnu++17 -o CMakeFiles/minis_imgedit.dir/imgedit/jni_bridge.cpp.o -c /Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/jni_bridge.cpp",
+  "file": "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/imgedit/jni_bridge.cpp"
+}
+]

@@ -1,0 +1,80 @@
+Flutter crash report.
+Please report a bug at https://github.com/flutter/flutter/issues.
+
+## command
+
+flutter analyze
+
+## exception
+
+_Exception: Exception: analysis server exited with code 64 and output:
+[stderr] Project
+[stderr]   build       Build a Dart application including code assets.
+[stderr]   compile     Compile Dart to various formats.
+[stderr]   create      Create a new Dart project.
+[stderr]   pub         Work with packages.
+[stderr]   run         Run a Dart program.
+[stderr]   test        Run tests for a project.
+[stderr] 
+[stderr] Source code
+[stderr]   analyze     Analyze Dart code in a directory.
+[stderr]   doc         Generate API documentation for Dart projects.
+[stderr]   fix         Apply automated fixes to Dart source code.
+[stderr]   format      Idiomatically format Dart source code.
+[stderr] 
+[stderr] Tools
+[stderr]   devtools    Open DevTools (optionally connecting to an existing application).
+[stderr]   info        Show diagnostic information about the installed tooling.
+[stderr] 
+[stderr] Run "dart help <command>" for more information about a command.
+[stderr] See https://dart.dev/tools/dart-tool for detailed documentation.
+
+```
+```
+
+## flutter doctor
+
+```
+[✓] Flutter (Channel stable, 3.38.5, on macOS 26.4.1 25E253 darwin-arm64, locale en-IN) [1,768ms]
+    • Flutter version 3.38.5 on channel stable at /Users/hy8rid/Development/flutter
+    • Upstream repository https://github.com/flutter/flutter.git
+    • Framework revision f6ff1529fd (6 months ago), 2025-12-11 11:50:07 -0500
+    • Engine revision 1527ae0ec5
+    • Dart version 3.10.4
+    • DevTools version 2.51.1
+    • Feature flags: enable-web, enable-linux-desktop, enable-macos-desktop, enable-windows-desktop, enable-android, enable-ios, cli-animations, enable-native-assets, omit-legacy-version-file, enable-lldb-debugging
+
+[✓] Android toolchain - develop for Android devices (Android SDK version 36.1.0) [14.0s]
+    • Android SDK at /Volumes/KRYPTIX/AndroidStudio/SDK
+    • Emulator version 36.1.9.0 (build_id 13823996) (CL:N/A)
+    • Platform android-36, build-tools 36.1.0
+    • ANDROID_HOME = /Volumes/KRYPTIX/AndroidStudio/SDK
+    • Java binary at: /Volumes/KRYPTIX/Library/Java/jdk-17.jdk/Contents/Home/bin/java
+      This JDK is specified in your Flutter configuration.
+      To change the current JDK, run: `flutter config --jdk-dir="path/to/jdk"`.
+    • Java version Java(TM) SE Runtime Environment (build 17.0.12+8-LTS-286)
+    • All Android licenses accepted.
+
+[✓] Xcode - develop for iOS and macOS (Xcode 26.5) [7.4s]
+    • Xcode at /Applications/Xcode.app/Contents/Developer
+    • Build 17F42
+    • CocoaPods version 1.16.2
+
+[✓] Chrome - develop for the web [12ms]
+    • Chrome at /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+
+[✓] Connected device (2 available) [13.2s]
+    • macOS (desktop) • macos  • darwin-arm64   • macOS 26.4.1 25E253 darwin-arm64
+    • Chrome (web)    • chrome • web-javascript • Google Chrome 148.0.7778.179
+    ! Error: Browsing on the local area network for Ladva's iPhone. Ensure the device is unlocked and attached with a cable or associated with the same local area network as this Mac.
+      The device must be opted into Developer Mode to connect wirelessly. (code -27)
+    ! Error: Browsing on the local area network for KindiBOX . Ensure the device is unlocked and attached with a cable or associated with the same local area network as this Mac.
+      The device must be opted into Developer Mode to connect wirelessly. (code -27)
+    ! Error: Browsing on the local area network for Hardik’s iPhone. Ensure the device is unlocked and attached with a cable or associated with the same local area network as this Mac.
+      The device must be opted into Developer Mode to connect wirelessly. (code -27)
+
+[✓] Network resources [548ms]
+    • All expected network resources are available.
+
+• No issues found!
+```

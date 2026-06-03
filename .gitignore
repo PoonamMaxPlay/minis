@@ -14,3 +14,6 @@ build/
 *.iml
 .DS_Store
 Thumbs.db
+
+# Markdown notes / planning docs — not uploaded
+*.md

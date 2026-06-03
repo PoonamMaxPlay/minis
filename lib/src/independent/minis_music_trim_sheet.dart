@@ -2,11 +2,10 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:audio_waveforms/audio_waveforms.dart';
+import 'package:loopit_minis/src/audio/minis_audio_player.dart';
+import 'package:loopit_minis/src/sys/paths.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/independent/minis_music_trim_math.dart';
@@ -149,13 +148,14 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
     try {
       final src = File(raw);
       if (!await src.exists()) return null;
-      final dir = await getTemporaryDirectory();
-      final ext = p.extension(raw);
+      final dirPath = await NativePaths.cacheDir();
+      if (dirPath == null) return null;
+      final ext = NativePaths.extension(raw);
       final dest = File(
-        p.join(
-          dir.path,
+        NativePaths.join([
+          dirPath,
           'minis_music_${DateTime.now().microsecondsSinceEpoch}$ext',
-        ),
+        ]),
       );
       await src.copy(dest.path);
       return dest.absolute.path.replaceAll('\\', '/');
@@ -656,7 +656,7 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
   }
 
   String get _trackDisplayName {
-    final n = p.basename(widget.audioPath);
+    final n = NativePaths.basename(widget.audioPath);
     if (n.isEmpty) return 'Selected audio';
     return n;
   }
