@@ -76,6 +76,15 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   int? _loopOutMs;
   bool _loopEnabled = false;
 
+  // Wall-clock extrapolation: video_player emits native position updates at
+  // ~2Hz, which would otherwise stutter the playhead. Each ticker frame we
+  // predict from (anchorVideoMs, anchorWallUs); re-anchor only on native
+  // advance / seek / play-toggle so prediction stays locked to truth.
+  final Stopwatch _wall = Stopwatch();
+  int _anchorVideoMs = 0;
+  int _anchorWallUs = 0;
+  int _lastNativeMs = -1;
+
   @override
   void initState() {
     super.initState();
@@ -193,11 +202,57 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   void _onControllerChange() {
     final c = _ctrl;
     if (c == null) return;
+    final nativeMs = c.value.position.inMilliseconds;
     final playing = c.value.isPlaying;
     if (playing != ed.isPlaying) {
       ed.isPlaying = playing;
+      if (playing) {
+        _anchorVideoMs = nativeMs;
+        _wall
+          ..reset()
+          ..start();
+        _anchorWallUs = 0;
+        _lastNativeMs = nativeMs;
+        _posTicker?.muted = false;
+      } else {
+        _wall.stop();
+        _anchorVideoMs = nativeMs;
+        _anchorWallUs = _wall.elapsedMicroseconds;
+        _lastNativeMs = nativeMs;
+        ed.positionMs = nativeMs;
+        _posTicker?.muted = true;
+      }
       if (mounted) setState(() {});
+      return;
     }
+    // Re-anchor on native advance (incl. user seek). Snap if predicted has
+    // drifted past one frame; otherwise leave prediction running smoothly.
+    if (nativeMs != _lastNativeMs) {
+      _lastNativeMs = nativeMs;
+      final predicted = _predictedMs();
+      if ((nativeMs - predicted).abs() > 32) {
+        _anchorVideoMs = nativeMs;
+        _anchorWallUs = _wall.elapsedMicroseconds;
+      }
+    }
+  }
+
+  double get _effectiveRate =>
+      _shuttleActive ? _shuttleRate : ed.clipSpeed;
+
+  // Capture current predicted ms at the OLD rate and stamp it as the new
+  // anchor, so a subsequent rate change continues smoothly from the same
+  // point at the NEW rate. Call BEFORE flipping rate state.
+  void _reanchorPrediction() {
+    final ms = _predictedMs();
+    _anchorVideoMs = ms;
+    _anchorWallUs = _wall.elapsedMicroseconds;
+  }
+
+  int _predictedMs() {
+    if (!_wall.isRunning) return _anchorVideoMs;
+    final elapsedUs = _wall.elapsedMicroseconds - _anchorWallUs;
+    return _anchorVideoMs + (elapsedUs * _effectiveRate / 1000).round();
   }
 
   void _startPositionTicker() {
@@ -206,7 +261,10 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       final c = _ctrl;
       if (c == null || !c.value.isInitialized) return;
       if (!c.value.isPlaying) return;
-      final ms = c.value.position.inMilliseconds;
+      var ms = _predictedMs();
+      final total = ed.totalDurationMs;
+      if (total > 0 && ms > total) ms = total;
+      if (ms < 0) ms = 0;
       // ValueNotifier setter dedupes; no full ChangeNotifier broadcast.
       ed.positionMs = ms;
       // Loop-region wrap: if playhead crossed out-point, jump back to in.
@@ -214,6 +272,9 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
       final loopOut = _loopOutMs;
       if (_loopEnabled && loopIn != null && loopOut != null && loopOut > loopIn && ms >= loopOut) {
         unawaited(c.seekTo(Duration(milliseconds: loopIn)));
+        _anchorVideoMs = loopIn;
+        _anchorWallUs = _wall.elapsedMicroseconds;
+        _lastNativeMs = loopIn;
       }
     })
       ..start();
@@ -355,6 +416,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final c = _ctrl;
     if (c == null) return;
     HapticFeedback.selectionClick();
+    _reanchorPrediction();
     _shuttleRate = rate;
     _shuttleActive = true;
     await c.setPlaybackSpeed(rate);
@@ -376,6 +438,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final c = _ctrl;
     if (c == null) return;
     HapticFeedback.selectionClick();
+    _reanchorPrediction();
     _shuttleActive = false;
     _shuttleRate = 1.0;
     await c.setPlaybackSpeed(ed.clipSpeed);
@@ -1251,6 +1314,7 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
     final picked = await showSpeedSheet(context, ed.clipSpeed);
     if (picked == null) return;
     _pushUndo('speed');
+    _reanchorPrediction();
     ed.clipSpeed = picked;
     await _ctrl?.setPlaybackSpeed(picked);
     ed.notify();

@@ -5,8 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:loopit_minis/loopit_minis.dart';
 
+import 'editor/editor_screen.dart';
 import 'example_capture_home.dart';
 import 'minis_example_save.dart';
+
+const String _kAutoEditPath = String.fromEnvironment('AUTO_EDIT_PATH');
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,7 +67,9 @@ class MinisExampleApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const MinisSession(child: ExampleCaptureHome()),
+      home: _kAutoEditPath.isNotEmpty
+          ? VideoEditorScreen(videoPath: _kAutoEditPath)
+          : const MinisSession(child: ExampleCaptureHome()),
     );
   }
 }

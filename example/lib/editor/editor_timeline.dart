@@ -1875,40 +1875,59 @@ class _Playhead extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<int>(
-      valueListenable: state.positionNotifier,
-      builder: (_, pos, __) {
-        final scroll = hCtrl.hasClients ? hCtrl.offset : 0.0;
-        final x = pad + pos * pxPerMs - scroll;
-        return Stack(
-          children: [
-            Positioned(
-              left: x.clamp(0.0, 1e6),
-              top: 0,
-              bottom: 0,
-              width: 2,
-              child: Container(color: kAccentCyan),
-            ),
-            Positioned(
-              left: (x - 5).clamp(0.0, 1e6),
-              top: 0,
-              width: 12,
-              height: 6,
-              child: Container(
-                decoration: const BoxDecoration(
-                  color: kAccentCyan,
-                  borderRadius: BorderRadius.only(
-                    bottomLeft: Radius.circular(2),
-                    bottomRight: Radius.circular(2),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        );
-      },
+    // CustomPaint with `repaint:` listenable bypasses the widget rebuild
+    // pipeline — only the leaf layer repaints on position/scroll changes.
+    // RepaintBoundary keeps the playhead in its own layer so sibling timeline
+    // strokes don't invalidate it.
+    return RepaintBoundary(
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _PlayheadPainter(
+          repaint: Listenable.merge([state.positionNotifier, hCtrl]),
+          state: state,
+          hCtrl: hCtrl,
+          pxPerMs: pxPerMs,
+          pad: pad,
+        ),
+      ),
     );
   }
+}
+
+class _PlayheadPainter extends CustomPainter {
+  _PlayheadPainter({
+    required Listenable repaint,
+    required this.state,
+    required this.hCtrl,
+    required this.pxPerMs,
+    required this.pad,
+  }) : super(repaint: repaint);
+
+  final EditorState state;
+  final ScrollController hCtrl;
+  final double pxPerMs;
+  final double pad;
+
+  static final Paint _fill = Paint()..color = kAccentCyan;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scroll = hCtrl.hasClients ? hCtrl.offset : 0.0;
+    final x = pad + state.positionMs * pxPerMs - scroll;
+    // Line.
+    canvas.drawRect(Rect.fromLTWH(x, 0, 2, size.height), _fill);
+    // Top handle (12×6 rounded bottom).
+    final handle = RRect.fromRectAndCorners(
+      Rect.fromLTWH(x - 5, 0, 12, 6),
+      bottomLeft: const Radius.circular(2),
+      bottomRight: const Radius.circular(2),
+    );
+    canvas.drawRRect(handle, _fill);
+  }
+
+  @override
+  bool shouldRepaint(_PlayheadPainter old) =>
+      pxPerMs != old.pxPerMs || pad != old.pad;
 }
 
 class _SnapLine extends StatelessWidget {
