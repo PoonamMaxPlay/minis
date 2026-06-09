@@ -19,10 +19,14 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Flip'), findsOneWidget);
+    // Tear down the tree explicitly so AnimationController tickers + the async
+    // _boot() chain finalize before the binding asserts on pending timers.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 4));
   });
 }
 
-class _FakeEngine implements MinisCameraEnginePort {
+class _FakeEngine extends MinisCameraEnginePort {
   @override
   bool isInitialized = false;
 

@@ -21,17 +21,27 @@ class ThermalGuard(context: Context) {
         }
     } else null
 
+    @Volatile private var attached = false
+
     fun addListener(l: Listener) { synchronized(listeners) { listeners.add(l) } }
 
     @RequiresApi(Build.VERSION_CODES.Q)
     fun attach() {
         val l = osListener ?: return
-        pm?.addThermalStatusListener(l)
+        if (attached) return
+        runCatching { pm?.addThermalStatusListener(l) }.onSuccess { attached = true }
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
     fun detach() {
         val l = osListener ?: return
-        pm?.removeThermalStatusListener(l)
+        // PowerManager.removeThermalStatusListener throws
+        // IllegalArgumentException when the listener was never registered.
+        // CameraXEngine.release() calls detach() unconditionally during the
+        // first dispose (before any successful attach), so guard the unregister
+        // with both the attached flag and a try/catch.
+        if (!attached) return
+        runCatching { pm?.removeThermalStatusListener(l) }
+        attached = false
     }
 }

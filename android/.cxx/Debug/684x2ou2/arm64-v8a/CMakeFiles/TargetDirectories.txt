@@ -1,4 +1,0 @@
-/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a/CMakeFiles/minis_camera_pipeline.dir
-/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a/CMakeFiles/minis_imgedit.dir
-/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a/CMakeFiles/edit_cache.dir
-/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/684x2ou2/arm64-v8a/CMakeFiles/rebuild_cache.dir

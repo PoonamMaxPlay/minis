@@ -115,7 +115,7 @@ static int run_single_pass(const char* src_path, const preset_t* p,
 
   int v_idx = -1, a_idx = -1;
   for (unsigned i = 0; i < ictx->nb_streams; i++) {
-    AVMediaType t = ictx->streams[i]->codecpar->codec_type;
+    enum AVMediaType t = ictx->streams[i]->codecpar->codec_type;
     if (t == AVMEDIA_TYPE_VIDEO && v_idx < 0) v_idx = (int)i;
     else if (t == AVMEDIA_TYPE_AUDIO && a_idx < 0) a_idx = (int)i;
   }

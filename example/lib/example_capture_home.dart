@@ -7,7 +7,7 @@ import 'package:loopit_minis/loopit_minis.dart';
 import 'create_feed_screen.dart';
 import 'example_capture_mode.dart';
 import 'example_mode_chips.dart';
-import 'reel_edit_screen.dart';
+import 'editor/editor_screen.dart';
 import 'story_edit_screen.dart';
 
 /// Camera-first home for the example app. Each mode opens Minis capture and
@@ -67,7 +67,7 @@ class _ExampleCaptureHomeState extends State<ExampleCaptureHome> {
   void _onClipConfirmed(String path) {
     final mode = _mode;
     if (mode == ExampleCaptureMode.reel) {
-      Get.to<void>(() => ReelEditScreen(videoPath: path));
+      Get.to<void>(() => VideoEditorScreen(videoPath: path));
     } else if (mode == ExampleCaptureMode.story) {
       Get.to<void>(() => StoryEditScreen(mediaPath: path));
     } else if (mode == ExampleCaptureMode.feed) {

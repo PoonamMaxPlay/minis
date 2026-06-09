@@ -20,8 +20,12 @@ class MinisNativeCameraPlatformViewFactory : PlatformViewFactory(StandardMessage
 }
 
 private class MinisNativeCameraPlatformView(context: Context) : PlatformView {
+    // COMPATIBLE = TextureView under the hood. PERFORMANCE (SurfaceView)
+    // punches through Flutter's overlay, so capture-screen icons drawn on top
+    // become invisible (the user can still tap them blindly). TextureView is
+    // composited inside Flutter's surface, keeping overlay icons visible.
     private val previewView = PreviewView(context).apply {
-        implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         scaleType = PreviewView.ScaleType.FILL_CENTER
     }
 

@@ -13,6 +13,7 @@ dependencies:
   flutter:
     sdk: flutter
   get: ^4.7.2
+  deepar_flutter_plus: ^0.2.1
 
 dev_dependencies:
   flutter_test:
@@ -28,3 +29,22 @@ flutter:
         pluginClass: LoopitMinisPlugin
       ios:
         pluginClass: LoopitMinisPlugin
+  assets:
+    - lib/assets/deepar_filters/burning_effect/
+    - lib/assets/deepar_filters/devil_neon_horns/
+    - lib/assets/deepar_filters/elephant_trunk/
+    - lib/assets/deepar_filters/emotion_meter/
+    - lib/assets/deepar_filters/emotions_exaggerator/
+    - lib/assets/deepar_filters/fire_effect/
+    - lib/assets/deepar_filters/flower_face/
+    - lib/assets/deepar_filters/galaxy_background/
+    - lib/assets/deepar_filters/hope/
+    - lib/assets/deepar_filters/humanoid/
+    - lib/assets/deepar_filters/makeup_look_simple/
+    - lib/assets/deepar_filters/makeup_look_split_screen/
+    - lib/assets/deepar_filters/ping_pong_minigame/
+    - lib/assets/deepar_filters/pixel_heart_particles/
+    - lib/assets/deepar_filters/snail/
+    - lib/assets/deepar_filters/stallone/
+    - lib/assets/deepar_filters/vendetta_mask/
+    - lib/assets/deepar_filters/viking_helmet_pbr/

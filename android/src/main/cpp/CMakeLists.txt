@@ -85,56 +85,11 @@ else ()
                    "See android/src/main/cpp/audio/lame_README.md to vendor it.")
 endif ()
 
-# --- video edit pipeline (improvement3.md) ---------------------------------
+# --- video edit pipeline ----------------------------------------------------
 #
-# Links against FFmpeg shared libraries (libavformat, libavcodec, etc.)
-# staged into ../jniLibs/<abi>/ by android/ffmpeg/build_android.sh. When
-# the .so files are absent (clean checkout), the library still builds but
-# the JNI calls return ENGINE_MISSING at runtime via the nativeLoaded
-# guard in VideoEditEngine.kt.
-
-set(FFMPEG_LIBS_DIR ${CMAKE_SOURCE_DIR}/../jniLibs/${ANDROID_ABI})
-set(FFMPEG_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/../../../ffmpeg/out/${ANDROID_ABI}/include)
-
-set(VIDEDIT_SOURCES
-    videdit/ff_session.c
-    videdit/ff_jni.c
-    videdit/ff_trim.c
-    videdit/ff_concat.c
-    videdit/ff_repair.c
-    videdit/ff_thumbstrip.c
-    videdit/ff_export.c
-    videdit/ff_progress.c
-    videdit/ff_audio_graph.c
-    videdit/ff_audio_mix.c
-    videdit/ff_subtitles.c
-    videdit/ff_bg_compose.c
-    videdit/gl_compositor.cpp
-    videdit/gl_clock.cpp
-    videdit/gl_preview_jni.c
-    videdit/mask_atlas.cpp
-)
-
-if (EXISTS ${FFMPEG_LIBS_DIR}/libavformat.so AND EXISTS ${FFMPEG_INCLUDE_DIR}/libavformat/avformat.h)
-    add_library(minis_videdit SHARED ${VIDEDIT_SOURCES})
-    target_include_directories(minis_videdit PRIVATE ${FFMPEG_INCLUDE_DIR})
-
-    foreach (lib avformat avcodec avfilter avutil swscale swresample)
-        add_library(ff_${lib} SHARED IMPORTED)
-        set_target_properties(ff_${lib} PROPERTIES IMPORTED_LOCATION
-            ${FFMPEG_LIBS_DIR}/lib${lib}.so)
-        target_link_libraries(minis_videdit ff_${lib})
-    endforeach ()
-
-    find_library(mediandk-lib mediandk)
-    target_link_libraries(minis_videdit
-        ${log-lib}
-        ${android-lib}
-        ${egl-lib}
-        ${gles3-lib}
-        ${mediandk-lib})
-else ()
-    message(WARNING "FFmpeg jniLibs not found at ${FFMPEG_LIBS_DIR}; "
-                    "skipping minis_videdit native build. Run "
-                    "android/ffmpeg/build_android.sh to produce them.")
-endif ()
+# Replaced by the prebuilt FFmpegKit Android artifact
+# (`com.arthenica:ffmpeg-kit-min-gpl`) declared in android/build.gradle. The
+# AAR ships avformat/avcodec/avfilter/swscale/swresample/avutil .so files for
+# every ABI and a Java/Kotlin API on top, so we no longer build
+# `libminis_videdit.so` from source. The C glue under videdit/ is kept as
+# reference only — none of the sources are compiled here.

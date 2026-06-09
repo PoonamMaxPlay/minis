@@ -45,7 +45,7 @@ static int open_input(const char* path, AVFormatContext** out_ctx,
   if (rc < 0) { avformat_close_input(&ctx); return rc; }
   int v = -1, a = -1;
   for (unsigned i = 0; i < ctx->nb_streams; i++) {
-    AVMediaType t = ctx->streams[i]->codecpar->codec_type;
+    enum AVMediaType t = ctx->streams[i]->codecpar->codec_type;
     if (t == AVMEDIA_TYPE_VIDEO && v < 0) v = (int)i;
     else if (t == AVMEDIA_TYPE_AUDIO && a < 0) a = (int)i;
   }

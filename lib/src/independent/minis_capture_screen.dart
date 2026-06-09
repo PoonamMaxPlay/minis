@@ -14,7 +14,9 @@ import 'package:loopit_minis/src/sys/wakelock.dart';
 
 import 'package:loopit_minis/src/videdit/videdit_engine.dart';
 import 'package:loopit_minis/src/videdit/videdit_types.dart';
+import 'package:loopit_minis/src/independent/deepar_camera_engine.dart';
 import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
+import 'package:loopit_minis/src/independent/minis_deepar_catalog.dart';
 import 'package:loopit_minis/src/independent/minis_native_permissions.dart';
 import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
@@ -31,6 +33,112 @@ import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
+
+/// Framing guides drawn over the preview. Engine still records its native
+/// aspect — these letterbox/safe-area overlays guide composition only.
+enum MinisAspectRatio {
+  full, // engine native; no letterbox
+  r9x16,
+  r4x5,
+  r1x1,
+}
+
+extension _MinisAspectRatioMath on MinisAspectRatio {
+  double? get ratio {
+    switch (this) {
+      case MinisAspectRatio.full:
+        return null;
+      case MinisAspectRatio.r9x16:
+        return 9 / 16;
+      case MinisAspectRatio.r4x5:
+        return 4 / 5;
+      case MinisAspectRatio.r1x1:
+        return 1.0;
+    }
+  }
+
+  String get shortLabel {
+    switch (this) {
+      case MinisAspectRatio.full:
+        return 'Full';
+      case MinisAspectRatio.r9x16:
+        return '9:16';
+      case MinisAspectRatio.r4x5:
+        return '4:5';
+      case MinisAspectRatio.r1x1:
+        return '1:1';
+    }
+  }
+}
+
+/// White-balance presets exposed by the rail. `auto` clears manual WB and
+/// lets the engine pick; named presets pass a kelvin value to `setManual`.
+enum MinisWhiteBalancePreset {
+  auto,
+  tungsten,
+  fluorescent,
+  daylight,
+  cloudy,
+}
+
+extension _MinisWhiteBalancePresetMeta on MinisWhiteBalancePreset {
+  String get label {
+    switch (this) {
+      case MinisWhiteBalancePreset.auto:
+        return 'Auto';
+      case MinisWhiteBalancePreset.tungsten:
+        return 'Tungsten';
+      case MinisWhiteBalancePreset.fluorescent:
+        return 'Fluor';
+      case MinisWhiteBalancePreset.daylight:
+        return 'Daylight';
+      case MinisWhiteBalancePreset.cloudy:
+        return 'Cloudy';
+    }
+  }
+
+  int? get kelvin {
+    switch (this) {
+      case MinisWhiteBalancePreset.auto:
+        return null;
+      case MinisWhiteBalancePreset.tungsten:
+        return 3200;
+      case MinisWhiteBalancePreset.fluorescent:
+        return 4000;
+      case MinisWhiteBalancePreset.daylight:
+        return 5500;
+      case MinisWhiteBalancePreset.cloudy:
+        return 6500;
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case MinisWhiteBalancePreset.auto:
+        return Icons.wb_auto;
+      case MinisWhiteBalancePreset.tungsten:
+        return Icons.wb_incandescent;
+      case MinisWhiteBalancePreset.fluorescent:
+        return Icons.wb_iridescent;
+      case MinisWhiteBalancePreset.daylight:
+        return Icons.wb_sunny;
+      case MinisWhiteBalancePreset.cloudy:
+        return Icons.wb_cloudy;
+    }
+  }
+}
+
+/// Process-lifetime UI preference cache for the capture screen. Survives
+/// re-entry into the screen during the same app session. Not persistent
+/// to disk — host apps that want disk persistence should wrap.
+class MinisCaptureSessionPrefs {
+  MinisCaptureSessionPrefs._();
+  static MinisCaptureSessionPrefs instance = MinisCaptureSessionPrefs._();
+
+  MinisAspectRatio aspectRatio = MinisAspectRatio.r9x16;
+  bool gridVisible = false;
+  MinisRecordCountdownMode countdownMode = MinisRecordCountdownMode.off;
+}
 
 /// Countdown before a **photo** is taken (self-timer). Video uses press-and-hold.
 enum MinisRecordCountdownMode {
@@ -159,7 +267,6 @@ class _MinisIndependentCaptureScreenState
   static const double _kCornerBtnSize = 48;
   static const double _kCornerIconSize = 22;
   static const double _kAppBarIconSize = 26;
-  static const double _kStatusPillIconSize = 17;
   static const double _kRailChevronSize = 26;
 
   /// Fixed column so rail icons and labels stay visually aligned.
@@ -197,6 +304,13 @@ class _MinisIndependentCaptureScreenState
   MinisCameraEnginePort? _engine;
   bool _ownEngine = false;
   bool _webUnsupported = false;
+
+  /// Active DeepAR filter — null means CameraX engine is running normally.
+  DeepArFilter? _activeFilter;
+  /// True while a DeepAR engine is mounted in [_engine] in place of CameraX.
+  bool _filterMode = false;
+  /// Re-entrancy guard for filter swap (dispose → init crossing).
+  bool _filterSwapping = false;
   bool _permissionDenied = false;
   bool _busy = true;
   /// Shown under the spinner when [_busy] is true (gallery, merge, camera ops).
@@ -207,7 +321,7 @@ class _MinisIndependentCaptureScreenState
   bool _lastCaptureIsVideo = false;
   bool _micEnabled = true;
   bool _railExpanded = true;
-  MinisRecordCountdownMode _countdownMode = MinisRecordCountdownMode.off;
+  late MinisRecordCountdownMode _countdownMode;
   bool _countingDown = false;
   int? _countdownTick;
   Timer? _maxRecordTimer;
@@ -241,7 +355,6 @@ class _MinisIndependentCaptureScreenState
   double _zoomMin = 1.0;
   double _zoomMax = 1.0;
   double _zoomLevel = 1.0;
-  int? _zoomGesturePointer;
   double _zoomPanStartY = 0;
   double _zoomPanStartLevel = 1.0;
 
@@ -253,9 +366,79 @@ class _MinisIndependentCaptureScreenState
   /// When [minisMulticlipMergeSupported] is false, show a one-time banner.
   bool _mergeLimitedBannerDismissed = false;
 
+  /// Rule-of-thirds composition grid overlay. Off by default; toggled via the
+  /// right-rail Grid action and persisted only for this session.
+  late bool _gridVisible;
+
+  /// Low-budget haptic markers fired during recording. Each Duration in this
+  /// set is consumed once per recording session so the same milestone never
+  /// double-pings (the elapsed ticker runs at 50ms cadence).
+  final Set<int> _lowBudgetHapticsFired = <int>{};
+
+  /// Accumulated pinch scale during the current zoom gesture. 1.0 = unchanged.
+  double _pinchAccumulatedScale = 1.0;
+  double _pinchStartZoomLevel = 1.0;
+  bool _zoomScaleActive = false;
+
+  /// Visible tap-to-focus reticle. Null = hidden. Position is in local preview
+  /// coordinates; the painter centers itself on this point.
+  Offset? _focusReticleAt;
+
+  /// True while AE/AF lock is engaged (long-press on preview). Pure UI hint;
+  /// cleared on next tap. Engine doesn't expose a lock API yet.
+  bool _aeAfLocked = false;
+  late final AnimationController _focusReticleController;
+  Timer? _focusReticleHideTimer;
+
+  /// Selected framing aspect ratio. UI-only overlay (engine still records its
+  /// native aspect); presentation/letterbox is applied here.
+  late MinisAspectRatio _aspectRatio;
+
+  /// Whether the shutter coachmark has been shown this session. Soft-persisted
+  /// for the lifetime of the screen — first-launch UX hint only.
+  bool _shutterCoachmarkDismissed = false;
+  Timer? _shutterCoachmarkTimer;
+
+  /// Engine capability snapshot loaded once during boot. Default = empty caps,
+  /// which keeps all extended-feature rails hidden until probed.
+  MinisCameraCapabilities _caps = const MinisCameraCapabilities();
+
+  /// HDR10 capture toggle — rail visible only when caps.hdr10.
+  bool _hdrEnabled = false;
+
+  /// Slow-mo FPS selection. -1 = off / standard. Cycles through caps.slowMoFps.
+  /// Rail visible only when caps.slowMoFps is non-empty.
+  int _slowMoFpsIdx = -1;
+
+  /// White-balance preset. Rail visible only when caps.manualWb is true.
+  MinisWhiteBalancePreset _wb = MinisWhiteBalancePreset.auto;
+
+  /// Live audio levels meter (peak/rms) while recording with mic on.
+  MinisAudioLevels? _liveAudioLevels;
+  StreamSubscription<MinisAudioLevels>? _audioLevelsSub;
+  StreamSubscription<MinisEngineEvent>? _stateSub;
+
+  /// Set when a recoverable in-progress recording was detected on boot.
+  /// We surface a one-shot dialog rather than auto-recovering.
+  bool _recoveryPromptShown = false;
+
+  /// Exposure bias in EV. Engines without exposure control silently ignore.
+  /// Visible after tap-to-focus alongside the reticle.
+  double _exposureBias = 0;
+  static const double _kExposureMin = -2.0;
+  static const double _kExposureMax = 2.0;
+  Timer? _exposureSliderHideTimer;
+  bool _exposureSliderVisible = false;
+
   @override
   void initState() {
     super.initState();
+    // Hydrate UI prefs from the session-scoped store so re-entering camera
+    // keeps last-used framing/grid/countdown — no disk I/O.
+    final prefs = MinisCaptureSessionPrefs.instance;
+    _aspectRatio = prefs.aspectRatio;
+    _gridVisible = prefs.gridVisible;
+    _countdownMode = prefs.countdownMode;
     // Observe app lifecycle so locking the device / sending the app to the
     // background stops an in-progress recording. Without this the camera
     // preview pauses but the underlying recorder keeps capturing audio.
@@ -272,6 +455,10 @@ class _MinisIndependentCaptureScreenState
       vsync: this,
       duration: const Duration(milliseconds: 1400),
     )..repeat(reverse: true);
+    _focusReticleController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
     // Lock orientation to portrait when entering capture screen
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -291,6 +478,11 @@ class _MinisIndependentCaptureScreenState
     }
     unawaited(_boot());
     unawaited(_manageAudioSession(true));
+    // Warm the VidEdit capability cache so the multi-clip banner reflects
+    // actual engine state instead of the cold-cache "unavailable" default.
+    unawaited(MinisVidEdit.instance.isAvailable().then((_) {
+      if (mounted) setState(() {});
+    }).catchError((_) {}));
   }
 
   Future<void> _manageAudioSession(bool active) async {
@@ -350,6 +542,11 @@ class _MinisIndependentCaptureScreenState
           _busyMessage = '';
         });
         unawaited(_syncZoomRangeFromEngine());
+        unawaited(_probeEngineCapabilities());
+        _subscribeAudioLevels();
+        _subscribeEngineStateStream();
+        unawaited(_maybePromptRecovery());
+        _armShutterCoachmarkAutoDismiss();
       }
       await _applyInitialMusicPrefillIfAny();
     } catch (e, st) {
@@ -532,8 +729,16 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _clipElapsedTicker?.cancel();
     _zoomBadgeTimer?.cancel();
+    _exposureSliderHideTimer?.cancel();
+    unawaited(_audioLevelsSub?.cancel());
+    _audioLevelsSub = null;
+    unawaited(_stateSub?.cancel());
+    _stateSub = null;
+    _shutterCoachmarkTimer?.cancel();
     _lockPulseController.dispose();
     _recordPulseController.dispose();
+    _focusReticleController.dispose();
+    _focusReticleHideTimer?.cancel();
     unawaited(_manageAudioSession(false));
     unawaited(_disposeGuideMusic().catchError((_) {}));
     if (_ownEngine) {
@@ -756,6 +961,123 @@ class _MinisIndependentCaptureScreenState
     _toast('Music cleared');
   }
 
+  /// Opens the DeepAR filter picker bottom sheet. Tapping a tile swaps the
+  /// running camera engine via [_setFilter]; tapping "None" returns to the
+  /// default CameraX engine.
+  Future<void> _pickFilter() async {
+    if (_busy || _recording || _countingDown || _filterSwapping) return;
+    final selected = await showModalBottomSheet<_FilterPick>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF111111),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _DeepArFilterSheet(active: _activeFilter),
+    );
+    if (selected == null) return;
+    await _setFilter(selected.filter);
+  }
+
+  /// Swaps the running engine to / from DeepAR for [target] (null = back to
+  /// CameraX). Disposes the previous engine first so the camera surface is
+  /// released cleanly before the other plugin grabs it.
+  Future<void> _setFilter(DeepArFilter? target) async {
+    if (!mounted || _filterSwapping) return;
+    if (_recording || _countingDown) {
+      _toast('Stop recording before changing filter');
+      return;
+    }
+    if (target?.id == _activeFilter?.id && _filterMode == (target != null)) {
+      return;
+    }
+    setState(() {
+      _filterSwapping = true;
+      _busy = true;
+      _busyMessage = target == null ? 'Switching off filter…' : 'Loading ${target.name}…';
+    });
+
+    try {
+      // Already running DeepAR + just swapping filter → fast path.
+      final current = _engine;
+      if (_filterMode && target != null && current is DeepArCameraEngine) {
+        await current.applyFilter(target);
+        if (!mounted) return;
+        setState(() {
+          _activeFilter = target;
+          _busy = false;
+          _busyMessage = '';
+          _filterSwapping = false;
+        });
+        return;
+      }
+
+      // Tear down whichever engine is currently mounted.
+      final old = _engine;
+      _engine = null;
+      if (old != null && _ownEngine) {
+        try {
+          await old.dispose();
+        } catch (e, st) {
+          debugPrint('MINIS: engine dispose during filter swap failed: $e\n$st');
+        }
+      }
+
+      if (target == null) {
+        // Back to CameraX.
+        final eng = await createMinisEngineAfterPermission(
+          performanceMode: widget.cameraPerformanceMode,
+          useNativeAndroidCamera: widget.useNativeAndroidCamera,
+        );
+        _engine = eng;
+        _ownEngine = true;
+        await eng.initialize();
+        if (!mounted) return;
+        setState(() {
+          _activeFilter = null;
+          _filterMode = false;
+          _busy = false;
+          _busyMessage = '';
+          _filterSwapping = false;
+        });
+        unawaited(_syncZoomRangeFromEngine());
+        unawaited(_probeEngineCapabilities());
+        _subscribeAudioLevels();
+        _subscribeEngineStateStream();
+      } else {
+        final eng = DeepArCameraEngine(initialFilter: target);
+        _engine = eng;
+        _ownEngine = true;
+        await eng.initialize();
+        if (!mounted) return;
+        setState(() {
+          _activeFilter = target;
+          _filterMode = true;
+          _busy = false;
+          _busyMessage = '';
+          _filterSwapping = false;
+        });
+        unawaited(_syncZoomRangeFromEngine());
+        unawaited(_probeEngineCapabilities());
+        _subscribeAudioLevels();
+        _subscribeEngineStateStream();
+        if (eng.isDegraded) {
+          _toast('DeepAR keys missing — showing preview only');
+        }
+      }
+    } catch (e, st) {
+      debugPrint('MINIS: _setFilter failed: $e\n$st');
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _busyMessage = '';
+          _filterSwapping = false;
+          _error = minisUserFriendlyException(e);
+        });
+      }
+    }
+  }
+
   /// Short label for the right rail (single line, fixed-width column).
   String get _timerRailLabel {
     switch (_countdownMode) {
@@ -814,6 +1136,55 @@ class _MinisIndependentCaptureScreenState
       !_recording &&
       !_countingDown &&
       !_busy;
+
+  bool get _hasUnsavedCapture =>
+      _videoClips.isNotEmpty ||
+      (_lastCapturePath != null && _lastCapturePath!.isNotEmpty);
+
+  /// PopScope callback when system-back is pressed and we blocked the pop.
+  /// Confirms via dialog; pops on confirm.
+  Future<void> _handleExitAttempt() async {
+    if (!mounted) return;
+    if (_recording) {
+      _toast('Stop recording before leaving.');
+      return;
+    }
+    if (_countingDown) {
+      _cancelCountdown();
+      return;
+    }
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text(
+          'Discard clip?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'Leaving now will discard the clip you recorded.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep recording'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (discard == true && mounted) {
+      final nav = Navigator.maybeOf(context);
+      if (nav != null && nav.canPop()) nav.pop();
+    }
+  }
 
   String? get _emptyConfirmHint {
     if (_recording || _busy || _countingDown) return null;
@@ -976,6 +1347,35 @@ class _MinisIndependentCaptureScreenState
     );
   }
 
+  Future<void> _pickSpeed() async {
+    if (_recording || _countingDown || _busy) return;
+    if (_videoClips.isNotEmpty) {
+      _toast(
+        'Speed cannot be changed after recording. '
+        'Remove the clip to pick a different speed.',
+      );
+      return;
+    }
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _SpeedSheet(
+        steps: _speedSteps,
+        activeIndex: _speedIndex,
+      ),
+    );
+    if (picked == null || !mounted) return;
+    if (picked == _speedIndex) return;
+    setState(() => _speedIndex = picked);
+    HapticFeedback.selectionClick();
+    _toast(
+      'Record cap ${_effectiveMaxRecording.inSeconds}s at $_speedRailLabel.',
+    );
+  }
+
   void _cycleCountdownMode() {
     if (_recording || _countingDown || _busy) return;
     setState(() {
@@ -985,6 +1385,7 @@ class _MinisIndependentCaptureScreenState
         MinisRecordCountdownMode.ten => MinisRecordCountdownMode.off,
       };
     });
+    MinisCaptureSessionPrefs.instance.countdownMode = _countdownMode;
   }
 
   /// Copy a gallery-picked video into app documents so the path stays valid
@@ -1773,7 +2174,16 @@ class _MinisIndependentCaptureScreenState
       MinisCaptureHost.completeCaptureResult(request.toMap());
       if (mounted) {
         final nav = Navigator.maybeOf(context, rootNavigator: true);
-        if (nav != null && nav.canPop()) nav.pop(request.toMap());
+        if (nav != null && nav.canPop()) {
+          nav.pop(request.toMap());
+        } else {
+          // Capture screen rendered as the root route (typical for the
+          // standalone example app). There's nothing to pop to, so hand the
+          // final path to the per-screen confirmation callback instead, so
+          // host apps that wire `onClipConfirmed` get a redirect to the
+          // editor screen.
+          widget.onClipConfirmed?.call(finalPath);
+        }
       }
       return;
     }
@@ -1923,6 +2333,230 @@ class _MinisIndependentCaptureScreenState
     }
   }
 
+  Future<void> _pickWhiteBalance() async {
+    if (_recording || _countingDown || _busy) return;
+    final picked = await showModalBottomSheet<MinisWhiteBalancePreset>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _WhiteBalanceSheet(active: _wb),
+    );
+    if (picked == null || !mounted || picked == _wb) return;
+    final eng = _engine;
+    if (eng == null) return;
+    _applyBusy(true, message: 'Setting ${picked.label} white balance…');
+    try {
+      await eng.setManual(wbKelvin: picked.kelvin);
+      if (mounted) setState(() => _wb = picked);
+      HapticFeedback.selectionClick();
+    } catch (e) {
+      _toast('WB error: ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) _applyBusy(false);
+    }
+  }
+
+  Future<void> _toggleHdr() async {
+    if (_recording || _countingDown || _busy) return;
+    final eng = _engine;
+    if (eng == null) return;
+    final want = !_hdrEnabled;
+    _applyBusy(true, message: want ? 'Enabling HDR…' : 'Disabling HDR…');
+    try {
+      final ok = await eng.enableHdr(want);
+      if (mounted) setState(() => _hdrEnabled = ok && want);
+      if (!ok && want) _toast('HDR not available on this lens.');
+    } catch (e) {
+      _toast('HDR error: ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) _applyBusy(false);
+    }
+  }
+
+  Future<void> _cycleSlowMo() async {
+    if (_recording || _countingDown || _busy) return;
+    final list = _caps.slowMoFps;
+    if (list.isEmpty) return;
+    final eng = _engine;
+    if (eng == null) return;
+    final nextIdx = _slowMoFpsIdx + 1 >= list.length ? -1 : _slowMoFpsIdx + 1;
+    final targetFps = nextIdx < 0 ? 0 : list[nextIdx];
+    _applyBusy(
+      true,
+      message: nextIdx < 0
+          ? 'Returning to normal speed…'
+          : 'Switching to ${list[nextIdx]} fps…',
+    );
+    try {
+      final res = await eng.enableSlowMo(targetFps);
+      if (!mounted) return;
+      if (nextIdx < 0 || res.enabled) {
+        setState(() => _slowMoFpsIdx = nextIdx);
+        _toast(nextIdx < 0 ? 'Slow-mo off' : 'Slow-mo ${res.actualFps} fps');
+      } else {
+        _toast('Slow-mo unavailable at that frame rate');
+      }
+    } catch (e) {
+      _toast('Slow-mo error: ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) _applyBusy(false);
+    }
+  }
+
+  /// Auto-dismiss the shutter coachmark after 6 seconds so first-time users
+  /// who explore the rail or gallery aren't blocked by it forever.
+  void _armShutterCoachmarkAutoDismiss() {
+    if (_shutterCoachmarkDismissed) return;
+    _shutterCoachmarkTimer?.cancel();
+    _shutterCoachmarkTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted || _shutterCoachmarkDismissed) return;
+      setState(() => _shutterCoachmarkDismissed = true);
+    });
+  }
+
+  Future<void> _probeEngineCapabilities() async {
+    final eng = _engine;
+    if (eng == null) return;
+    try {
+      final c = await eng.getCapabilities();
+      if (!mounted) return;
+      setState(() => _caps = c);
+    } catch (e) {
+      debugPrint('MINIS: getCapabilities failed: $e');
+    }
+  }
+
+  void _subscribeEngineStateStream() {
+    _stateSub?.cancel();
+    final eng = _engine;
+    if (eng == null) return;
+    try {
+      _stateSub = eng.stateStream.listen(
+        (event) {
+          if (!mounted) return;
+          if (event.state == MinisEngineState.error) {
+            final msg = event.message ?? 'Camera engine reported an error.';
+            _toast(msg);
+            setState(() {
+              _error = msg;
+              _recording = false;
+              _busy = false;
+            });
+          }
+        },
+        onError: (e) {
+          debugPrint('MINIS: stateStream listener error: $e');
+        },
+      );
+    } catch (e) {
+      debugPrint('MINIS: stateStream subscribe failed: $e');
+    }
+  }
+
+  Future<void> _maybePromptRecovery() async {
+    if (_recoveryPromptShown) return;
+    final eng = _engine;
+    if (eng == null) return;
+    MinisRecoveryInfo? info;
+    try {
+      info = await eng.probeRecovery();
+    } catch (e) {
+      debugPrint('MINIS: probeRecovery failed: $e');
+      return;
+    }
+    if (info == null || !mounted) return;
+    _recoveryPromptShown = true;
+    final wantRecover = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text(
+          'Recover unfinished clip?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'A recording was interrupted. Recover it now, or discard.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Discard'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Recover'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (wantRecover == true) {
+      _applyBusy(true, message: 'Recovering clip…');
+      try {
+        final path = await eng.recoverAndFinalize();
+        if (!mounted) return;
+        if (path != null && path.isNotEmpty) {
+          await _appendVideoSegment(path, 0, durationAlreadyFinalized: false);
+          _toast('Recovered last recording.');
+        } else {
+          _toast('Nothing recoverable from previous session.');
+        }
+      } catch (e) {
+        _toast('Recovery failed: ${minisUserFriendlyException(e)}');
+      } finally {
+        if (mounted) _applyBusy(false);
+      }
+    } else {
+      try {
+        await eng.discardRecovery();
+      } catch (e) {
+        debugPrint('MINIS: discardRecovery failed: $e');
+      }
+    }
+  }
+
+  void _subscribeAudioLevels() {
+    _audioLevelsSub?.cancel();
+    final eng = _engine;
+    if (eng == null) return;
+    try {
+      _audioLevelsSub = eng.audioLevelsStream.listen(
+        (lv) {
+          if (!mounted) return;
+          if (!_recording || !_micEnabled) {
+            if (_liveAudioLevels != null) {
+              setState(() => _liveAudioLevels = null);
+            }
+            return;
+          }
+          setState(() => _liveAudioLevels = lv);
+        },
+        onError: (_) {},
+      );
+    } catch (e) {
+      debugPrint('MINIS: audioLevelsStream subscribe failed: $e');
+    }
+  }
+
+  /// Fires a light haptic at predetermined remaining-time milestones (5s, 3s,
+  /// 1s) before the session cap. Each milestone fires at most once per take.
+  void _emitLowBudgetHapticsIfNeeded() {
+    final remainingMs =
+        _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
+    if (remainingMs <= 0) return;
+    const milestonesMs = <int>[5000, 3000, 1000];
+    for (final ms in milestonesMs) {
+      if (remainingMs <= ms && !_lowBudgetHapticsFired.contains(ms)) {
+        _lowBudgetHapticsFired.add(ms);
+        HapticFeedback.lightImpact();
+      }
+    }
+  }
+
   Future<void> _startRecordingInternal() async {
     final eng = _engine;
     if (eng == null || !eng.isInitialized || _recording) return;
@@ -1943,14 +2577,23 @@ class _MinisIndependentCaptureScreenState
       if (!mounted) return;
       _activeClipStartedAt = DateTime.now();
       _clipBudgetMsAtRecordStart = budgetMs;
+      // Hide transient HUD overlays so they don't obscure the recording.
+      _focusReticleHideTimer?.cancel();
+      _exposureSliderHideTimer?.cancel();
+      _focusReticleAt = null;
+      _exposureSliderVisible = false;
+      _zoomBadgeVisible = false;
       setState(() => _recording = true);
       // unawaited(_syncZoomRangeFromEngine()); // Removed to prevent freeze on recording start
       unawaited(_startGuideMusicForRecording());
       unawaited(_ensureGuideMusicPlayingAfterRecordStart());
       _clipElapsedTicker?.cancel();
+      _lowBudgetHapticsFired.clear();
       _clipElapsedTicker =
           Timer.periodic(const Duration(milliseconds: 50), (_) {
-        if (mounted && _recording) setState(() {});
+        if (!mounted || !_recording) return;
+        _emitLowBudgetHapticsIfNeeded();
+        setState(() {});
       });
       _maxRecordTimer?.cancel();
       _maxRecordTimer = Timer(cap, () {
@@ -1993,7 +2636,6 @@ class _MinisIndependentCaptureScreenState
       _applyBusy(true, message: 'Saving…');
       final rawPath = await eng.stopRecording();
       if (!mounted) return;
-      _zoomGesturePointer = null;
       if (rawPath != null && rawPath.isNotEmpty) {
         // iOS: The camera plugin saves to tmp/ which is inaccessible to
         // AVAssetExportSession during composition (OSStatus error -12660).
@@ -2038,7 +2680,6 @@ class _MinisIndependentCaptureScreenState
     } catch (e) {
       if (mounted) {
         setState(() => _recording = false);
-        _zoomGesturePointer = null;
       }
       _toast('Stop failed. ${minisUserFriendlyException(e)}');
     } finally {
@@ -2084,37 +2725,44 @@ class _MinisIndependentCaptureScreenState
     } catch (_) {}
   }
 
-  void _onPreviewZoomPointerDown(PointerDownEvent e) {
+  void _onPreviewScaleStart(ScaleStartDetails d) {
     if (_busy || _countingDown) return;
-    // Bug 8 fix: if the shutter finger is already down (hold-to-record),
-    // ignore new pointers on the preview area so zoom does not fire during
-    // recording start (user adjusting grip can accidentally swipe).
     if (_shutterFingerDown) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
-    _zoomGesturePointer = e.pointer;
-    _zoomPanStartY = e.localPosition.dy;
+    _zoomPanStartY = d.focalPoint.dy;
     _zoomPanStartLevel = _zoomLevel;
-    // Show the zoom HUD badge when a gesture begins.
+    _pinchStartZoomLevel = _zoomLevel;
+    _pinchAccumulatedScale = 1.0;
+    _zoomScaleActive = true;
     if (mounted) setState(() => _zoomBadgeVisible = true);
     _zoomBadgeTimer?.cancel();
   }
 
-  void _onPreviewZoomPointerMove(PointerMoveEvent e) {
-    // Bug 8 fix: also skip move events while the shutter is held.
+  void _onPreviewScaleUpdate(ScaleUpdateDetails d) {
     if (_busy || _countingDown || _shutterFingerDown) return;
-    if (e.pointer != _zoomGesturePointer) return;
+    if (!_zoomScaleActive) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
     final span = _zoomMax - _zoomMin;
     if (span <= 1e-6) return;
-    final h = MediaQuery.sizeOf(context).height;
-    if (h <= 0) return;
-    // Swipe up (smaller dy) → zoom in; swipe down → zoom out.
-    final deltaY = e.localPosition.dy - _zoomPanStartY;
-    const sensitivity = 1.75;
-    final rawTarget =
-        _zoomPanStartLevel - (deltaY / h) * span * sensitivity;
+
+    final isPinch = d.pointerCount >= 2;
+    double rawTarget;
+    if (isPinch) {
+      // Multi-touch pinch: scale relative to the level at pinch start.
+      _pinchAccumulatedScale = d.scale.clamp(0.05, 50.0);
+      rawTarget =
+          (_pinchStartZoomLevel * _pinchAccumulatedScale).clamp(_zoomMin, _zoomMax);
+    } else {
+      // Single-finger vertical drag: swipe up = zoom in.
+      final h = MediaQuery.sizeOf(context).height;
+      if (h <= 0) return;
+      final deltaY = d.focalPoint.dy - _zoomPanStartY;
+      const sensitivity = 1.75;
+      rawTarget =
+          _zoomPanStartLevel - (deltaY / h) * span * sensitivity;
+    }
     final target = rawTarget.clamp(_zoomMin, _zoomMax);
     const smooth = 0.42;
     var next = _zoomLevel + (target - _zoomLevel) * smooth;
@@ -2126,21 +2774,168 @@ class _MinisIndependentCaptureScreenState
     if (mounted) setState(() {});
   }
 
-  void _onPreviewZoomPointerUpOrCancel(PointerEvent e) {
-    if (e.pointer == _zoomGesturePointer) {
-      _zoomGesturePointer = null;
-      // Auto-hide the zoom badge 1.8s after the gesture ends.
-      _zoomBadgeTimer?.cancel();
-      _zoomBadgeTimer = Timer(const Duration(milliseconds: 1800), () {
-        if (mounted) setState(() => _zoomBadgeVisible = false);
-      });
+  void _onPreviewScaleEnd(ScaleEndDetails d) {
+    _zoomScaleActive = false;
+    _zoomBadgeTimer?.cancel();
+    _zoomBadgeTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted) setState(() => _zoomBadgeVisible = false);
+    });
+  }
+
+  /// Tap on the preview → animated focus reticle + engine focus call. We use
+  /// normalized [0,1] coordinates so engines independent of preview size can
+  /// translate to native sensor coordinates. Suppressed in filter mode since
+  /// the DeepAR engine doesn't implement tap-to-focus.
+  Future<void> _onPreviewTapToFocus(TapUpDetails d, Size canvasSize) async {
+    if (_busy || _countingDown) return;
+    if (_filterMode) return;
+    if (_aeAfLocked) {
+      _toast('AE/AF unlocked');
+      setState(() => _aeAfLocked = false);
+      return;
     }
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    final w = canvasSize.width;
+    final h = canvasSize.height;
+    if (w <= 0 || h <= 0) return;
+    final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
+    final ny = (d.localPosition.dy / h).clamp(0.0, 1.0);
+    setState(() {
+      _focusReticleAt = d.localPosition;
+    });
+    _focusReticleController
+      ..reset()
+      ..forward();
+    HapticFeedback.selectionClick();
+    _showExposureSlider();
+    _focusReticleHideTimer?.cancel();
+    _focusReticleHideTimer = Timer(const Duration(milliseconds: 1100), () {
+      if (!mounted) return;
+      setState(() => _focusReticleAt = null);
+    });
+    try {
+      await eng.tapToFocus(x: nx, y: ny);
+    } catch (e) {
+      debugPrint('MINIS: tapToFocus failed: $e');
+    }
+  }
+
+  /// Long-press on preview → lock AE/AF visually. Pure UI flag (engine port
+  /// has no lock API yet); cleared by next tap.
+  void _onPreviewLongPressToLock(LongPressStartDetails d, Size canvasSize) {
+    if (_busy || _countingDown || _filterMode) return;
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    final w = canvasSize.width;
+    final h = canvasSize.height;
+    if (w <= 0 || h <= 0) return;
+    final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
+    final ny = (d.localPosition.dy / h).clamp(0.0, 1.0);
+    setState(() {
+      _focusReticleAt = d.localPosition;
+      _aeAfLocked = true;
+    });
+    _focusReticleController
+      ..reset()
+      ..forward();
+    _focusReticleHideTimer?.cancel();
+    HapticFeedback.mediumImpact();
+    _toast('AE/AF locked — tap to unlock');
+    try {
+      unawaited(eng.tapToFocus(x: nx, y: ny));
+    } catch (_) {}
+  }
+
+  /// Make the EV slider visible for ~3.2s; re-arm timer on each interaction.
+  void _showExposureSlider() {
+    _exposureSliderHideTimer?.cancel();
+    if (!_exposureSliderVisible && mounted) {
+      setState(() => _exposureSliderVisible = true);
+    }
+    _exposureSliderHideTimer = Timer(const Duration(milliseconds: 3200), () {
+      if (!mounted) return;
+      setState(() => _exposureSliderVisible = false);
+    });
+  }
+
+  Future<void> _onExposureBiasChanged(double next) async {
+    var clamped = next.clamp(_kExposureMin, _kExposureMax).toDouble();
+    // Snap to zero when within 0.1 EV so users land at neutral cleanly.
+    if (clamped.abs() < 0.1) clamped = 0.0;
+    if ((clamped - _exposureBias).abs() < 0.01) return;
+    setState(() => _exposureBias = clamped);
+    _showExposureSlider();
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    try {
+      await eng.setExposureBias(clamped);
+    } catch (e) {
+      debugPrint('MINIS: setExposureBias failed: $e');
+    }
+  }
+
+  /// Bottom-sheet picker for the framing guide. Long-press the rail action to
+  /// quick-cycle instead (see [_cycleAspectRatio]).
+  Future<void> _pickAspectRatio() async {
+    if (_recording || _countingDown || _busy) return;
+    final picked = await showModalBottomSheet<MinisAspectRatio>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _AspectRatioSheet(active: _aspectRatio),
+    );
+    if (picked == null || !mounted) return;
+    if (picked == _aspectRatio) return;
+    setState(() => _aspectRatio = picked);
+    MinisCaptureSessionPrefs.instance.aspectRatio = picked;
+    HapticFeedback.selectionClick();
+  }
+
+  /// Cycle UI framing guide (rail long-press shortcut).
+  void _cycleAspectRatio() {
+    if (_recording || _countingDown) return;
+    const order = MinisAspectRatio.values;
+    final idx = order.indexOf(_aspectRatio);
+    final next = order[(idx + 1) % order.length];
+    setState(() => _aspectRatio = next);
+    MinisCaptureSessionPrefs.instance.aspectRatio = next;
+    HapticFeedback.selectionClick();
+  }
+
+  /// Jump zoom to a preset multiplier (e.g. 1x, 2x). Clamped to engine range.
+  Future<void> _setZoomPreset(double level) async {
+    if (_busy || _countingDown) return;
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    final span = _zoomMax - _zoomMin;
+    if (span <= 1e-6) return;
+    final target = level.clamp(_zoomMin, _zoomMax).toDouble();
+    if ((target - _zoomLevel).abs() < 0.005) return;
+    _zoomLevel = target;
+    try {
+      await eng.setZoomLevel(target);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _zoomBadgeVisible = true;
+    });
+    HapticFeedback.selectionClick();
+    _zoomBadgeTimer?.cancel();
+    _zoomBadgeTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) setState(() => _zoomBadgeVisible = false);
+    });
   }
 
   void _onShutterPointerDown(PointerDownEvent event) {
     if (_busy || _countingDown) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
+    if (!_shutterCoachmarkDismissed) {
+      _shutterCoachmarkDismissed = true;
+    }
     // Already recording (hands-free locked): mark this press as tap-to-stop;
     // actual stop fires on PointerUp so a quick press cancels cleanly.
     if (_recording) {
@@ -2151,7 +2946,7 @@ class _MinisIndependentCaptureScreenState
       _toast('Recording limit reached.');
       return;
     }
-    _zoomGesturePointer = null;
+    _zoomScaleActive = false;
     _zoomBadgeTimer?.cancel();
     if (_zoomBadgeVisible && mounted) {
       setState(() => _zoomBadgeVisible = false);
@@ -2188,6 +2983,7 @@ class _MinisIndependentCaptureScreenState
       _lockReadyToEngage = false;
       _lockDragProgress = 1.0;
       HapticFeedback.mediumImpact();
+      _toast('Hands-free recording — tap shutter to stop.');
       if (mounted) setState(() {});
       return;
     }
@@ -2261,9 +3057,13 @@ class _MinisIndependentCaptureScreenState
       for (var i = sec; i > 0; i--) {
         if (!mounted) return;
         setState(() => _countdownTick = i);
+        if (i <= 3) {
+          HapticFeedback.selectionClick();
+        }
         await Future<void>.delayed(const Duration(seconds: 1));
       }
       if (!mounted) return;
+      HapticFeedback.mediumImpact();
       setState(() {
         _countingDown = false;
         _countdownTick = null;
@@ -2384,31 +3184,36 @@ class _MinisIndependentCaptureScreenState
       width: _kRailColumnWidth,
       child: Opacity(
         opacity: disabled ? 0.45 : 1,
-        child: InkWell(
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                SizedBox(
-                  height: _kRailIconSlotHeight,
-                  child: Center(
-                    child: Icon(
-                      icon,
-                      color: iconColor ?? Colors.white,
-                      size: _kRailIconSize,
+        child: Semantics(
+          button: true,
+          label: subtitle == null ? label : '$label, $subtitle',
+          enabled: !disabled,
+          child: InkWell(
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    height: _kRailIconSlotHeight,
+                    child: Center(
+                      child: Icon(
+                        icon,
+                        color: iconColor ?? Colors.white,
+                        size: _kRailIconSize,
+                      ),
                     ),
                   ),
-                ),
-                SizedBox(
-                  height: subtitle == null ? _kRailLabelSlotHeight : 40,
-                  width: _kRailColumnWidth,
-                  child: Center(child: labelChild),
-                ),
-              ],
+                  SizedBox(
+                    height: subtitle == null ? _kRailLabelSlotHeight : 40,
+                    width: _kRailColumnWidth,
+                    child: Center(child: labelChild),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -2646,29 +3451,226 @@ class _MinisIndependentCaptureScreenState
     );
   }
 
+  /// Discrete zoom presets (0.5x / 1x / 2x), shown only when the engine reports
+  /// a meaningful range that includes them. Falls back to hidden otherwise.
+  Widget _buildZoomPresetRow() {
+    final span = _zoomMax - _zoomMin;
+    if (span < 0.5) return const SizedBox.shrink();
+    final candidates = <double>[];
+    if (_zoomMin <= 0.5 + 1e-3) candidates.add(0.5);
+    candidates.add(1.0);
+    if (_zoomMax >= 2.0 - 1e-3) candidates.add(2.0);
+    final shown = candidates
+        .where((v) => v >= _zoomMin - 1e-3 && v <= _zoomMax + 1e-3)
+        .toList();
+    if (shown.length < 2) return const SizedBox.shrink();
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.42),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final v in shown) ...[
+              _zoomPresetChip(v),
+              const SizedBox(width: 2),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _zoomPresetChip(double value) {
+    final selected = (_zoomLevel - value).abs() < 0.06;
+    final labelStr = value == value.roundToDouble()
+        ? '${value.toStringAsFixed(0)}×'
+        : '${value.toStringAsFixed(1)}×';
+    return Semantics(
+      button: true,
+      label: 'Zoom $labelStr',
+      selected: selected,
+      child: InkResponse(
+        onTap: () => unawaited(_setZoomPreset(value)),
+        radius: 28,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 38,
+          height: 38,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: selected
+                ? Colors.white.withValues(alpha: 0.92)
+                : Colors.transparent,
+          ),
+          child: Text(
+            labelStr,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              height: 1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _roundSecondaryButton({
     required IconData icon,
     required VoidCallback? onPressed,
     bool filled = true,
+    String? semanticLabel,
   }) {
-    return Material(
-      color: filled
-          ? Colors.white.withValues(alpha: 0.22)
-          : Colors.white.withValues(alpha: 0.08),
-      shape: const CircleBorder(),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onPressed,
-        customBorder: const CircleBorder(),
-        child: SizedBox(
-          width: _kCornerBtnSize,
-          height: _kCornerBtnSize,
-          child: Icon(
-            icon,
-            color: onPressed == null
-                ? Colors.white.withValues(alpha: 0.35)
-                : Colors.white,
-            size: _kCornerIconSize,
+    return Semantics(
+      button: true,
+      enabled: onPressed != null,
+      label: semanticLabel,
+      child: Material(
+        color: filled
+            ? Colors.white.withValues(alpha: 0.22)
+            : Colors.white.withValues(alpha: 0.08),
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const CircleBorder(),
+          child: SizedBox(
+            width: _kCornerBtnSize,
+            height: _kCornerBtnSize,
+            child: Icon(
+              icon,
+              color: onPressed == null
+                  ? Colors.white.withValues(alpha: 0.35)
+                  : Colors.white,
+              size: _kCornerIconSize,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Vertical exposure slider (-2..+2 EV). Drag up = brighter. Bias label
+  /// floats next to the thumb; tap the sun icon to reset to 0.
+  Widget _buildExposureSlider() {
+    return Semantics(
+      label: 'Exposure ${_exposureBias.toStringAsFixed(1)} EV',
+      slider: true,
+      child: SizedBox(
+        width: 36,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              onTap: () => unawaited(_onExposureBiasChanged(0)),
+              child: const Padding(
+                padding: EdgeInsets.only(bottom: 4),
+                child: Icon(
+                  Icons.wb_sunny,
+                  color: Color(0xFFFFD96A),
+                  size: 18,
+                ),
+              ),
+            ),
+            Expanded(
+              child: RotatedBox(
+                quarterTurns: -1,
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2,
+                    thumbColor: const Color(0xFFFFD96A),
+                    activeTrackColor: const Color(0xFFFFD96A),
+                    inactiveTrackColor: Colors.white24,
+                    overlayShape: SliderComponentShape.noOverlay,
+                  ),
+                  child: Slider(
+                    min: _kExposureMin,
+                    max: _kExposureMax,
+                    value: _exposureBias,
+                    onChanged: (v) => unawaited(_onExposureBiasChanged(v)),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 2,
+                ),
+                child: Text(
+                  _exposureBias > 0
+                      ? '+${_exposureBias.toStringAsFixed(1)}'
+                      : _exposureBias.toStringAsFixed(1),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    height: 1,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShutterCoachmark() {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+      tween: Tween<double>(begin: 0, end: 1),
+      builder: (context, t, child) {
+        return Opacity(opacity: t, child: child);
+      },
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.16),
+            width: 1,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.touch_app,
+                color: Color(0xFF7DD3FC),
+                size: 18,
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  widget.videoOnly
+                      ? 'Hold the shutter to record · slide left to lock'
+                      : 'Tap shutter for photo · hold for video',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    height: 1.25,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -2758,7 +3760,13 @@ class _MinisIndependentCaptureScreenState
     final topPad = MediaQuery.paddingOf(context).top;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
 
-    return Scaffold(
+    return PopScope(
+      canPop: !_hasUnsavedCapture && !_recording && !_countingDown,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        unawaited(_handleExitAttempt());
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
@@ -2812,14 +3820,99 @@ class _MinisIndependentCaptureScreenState
             ),
           if (eng != null && !_busy && !_countingDown)
             Positioned.fill(
-              child: Listener(
-                behavior: HitTestBehavior.translucent,
-                onPointerDown: _onPreviewZoomPointerDown,
-                onPointerMove: _onPreviewZoomPointerMove,
-                onPointerUp: _onPreviewZoomPointerUpOrCancel,
-                onPointerCancel: _onPreviewZoomPointerUpOrCancel,
-                child: const SizedBox.expand(),
+              child: LayoutBuilder(
+                builder: (ctx, c) {
+                  final size = Size(c.maxWidth, c.maxHeight);
+                  return GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onScaleStart: _onPreviewScaleStart,
+                    onScaleUpdate: _onPreviewScaleUpdate,
+                    onScaleEnd: _onPreviewScaleEnd,
+                    onTapUp: (d) =>
+                        unawaited(_onPreviewTapToFocus(d, size)),
+                    onDoubleTap: (_busy || _recording || _countingDown)
+                        ? null
+                        : () => unawaited(_flip()),
+                    onLongPressStart: (d) =>
+                        _onPreviewLongPressToLock(d, size),
+                    child: const SizedBox.expand(),
+                  );
+                },
               ),
+            ),
+          if (eng != null &&
+              !_busy &&
+              !_countingDown &&
+              _aspectRatio != MinisAspectRatio.full)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: _AspectFramingPainter(_aspectRatio.ratio!),
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && !_countingDown && _gridVisible)
+            const Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(painter: _RuleOfThirdsGridPainter()),
+              ),
+            ),
+          if (eng != null && !_busy && _focusReticleAt != null)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedBuilder(
+                  animation: _focusReticleController,
+                  builder: (context, _) {
+                    final t = _focusReticleController.value;
+                    return CustomPaint(
+                      painter: _FocusReticlePainter(
+                        center: _focusReticleAt!,
+                        progress: _aeAfLocked ? 0.0 : t,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && _aeAfLocked && _focusReticleAt != null)
+            Positioned(
+              left: (_focusReticleAt!.dx - 40).clamp(8.0, 9999.0),
+              top: (_focusReticleAt!.dy + 48).clamp(0.0, 9999.0),
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xCC1B2A3A),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: const Color(0xFF7DD3FC),
+                      width: 1,
+                    ),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 3,
+                    ),
+                    child: Text(
+                      'AE/AF LOCK',
+                      style: TextStyle(
+                        color: Color(0xFF7DD3FC),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && _exposureSliderVisible)
+            Positioned(
+              right: 14,
+              top: topPad + 110,
+              bottom: bottomPad + 220,
+              child: _buildExposureSlider(),
             ),
           // Bug 8 fix: zoom level HUD badge — shown during vertical drag gesture.
           // Appears at the left-centre of the preview and auto-fades after lift.
@@ -2866,59 +3959,74 @@ class _MinisIndependentCaptureScreenState
             top: 0,
             left: 0,
             right: 0,
+            height: topPad + 56,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.45),
+                      Colors.black.withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
             child: SafeArea(
               bottom: false,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
                 child: Row(
                   children: [
-                    IconButton(
-                      onPressed: () {
-                        final nav = Navigator.maybeOf(context);
-                        if (nav != null && nav.canPop()) {
-                          nav.pop();
-                        }
-                      },
-                      icon: const Icon(
-                        Icons.chevron_left,
-                        color: Colors.white,
-                        size: _kAppBarIconSize,
+                    Semantics(
+                      button: true,
+                      label: _hasUnsavedCapture || _recording
+                          ? 'Close camera (will prompt to discard)'
+                          : 'Close camera',
+                      child: IconButton(
+                        onPressed: () {
+                          if (_hasUnsavedCapture ||
+                              _recording ||
+                              _countingDown) {
+                            unawaited(_handleExitAttempt());
+                            return;
+                          }
+                          final nav = Navigator.maybeOf(context);
+                          if (nav != null && nav.canPop()) {
+                            nav.pop();
+                          }
+                        },
+                        icon: const Icon(
+                          Icons.chevron_left,
+                          color: Colors.white,
+                          size: _kAppBarIconSize,
+                        ),
                       ),
                     ),
                     const Spacer(),
-                    if (_recording)
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Colors.red.withValues(alpha: 0.92),
-                          borderRadius: BorderRadius.circular(22),
+                    if (_recording) ...[
+                      _RecPill(
+                        elapsedLabel: minisFormatClipDurationLabel(
+                          _clipsTotalDurationMs + _liveClipElapsedMs,
                         ),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.videocam,
-                                color: Colors.white,
-                                size: _kStatusPillIconSize,
-                              ),
-                              SizedBox(width: 6),
-                              Text(
-                                'REC',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 12,
-                                  height: 1,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
+                        pulse: _recordPulseController,
                       ),
+                      if (_micEnabled && _liveAudioLevels != null) ...[
+                        const SizedBox(width: 8),
+                        _AudioLevelMeter(levels: _liveAudioLevels!),
+                      ],
+                      if (!_micEnabled && _musicSegment == null) ...[
+                        const SizedBox(width: 8),
+                        const _MicMutedPill(),
+                      ],
+                    ],
                   ],
                 ),
               ),
@@ -3012,6 +4120,9 @@ class _MinisIndependentCaptureScreenState
                       label: _speedRailLabel,
                       onTap: (_busy || _recording || _countingDown)
                           ? null
+                          : () => unawaited(_pickSpeed()),
+                      onLongPress: (_busy || _recording || _countingDown)
+                          ? null
                           : _cycleSpeed,
                     ),
                     if (!widget.videoOnly)
@@ -3022,7 +4133,62 @@ class _MinisIndependentCaptureScreenState
                             ? null
                             : _cycleCountdownMode,
                       ),
+                    _railAction(
+                      icon: Icons.auto_awesome,
+                      label: _activeFilter == null ? 'Filters' : 'Filter',
+                      subtitle: _activeFilter?.name,
+                      iconColor: _activeFilter != null
+                          ? const Color(0xFF7DD3FC)
+                          : null,
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : _pickFilter,
+                      onLongPress: (_busy ||
+                              _recording ||
+                              _countingDown ||
+                              _activeFilter == null)
+                          ? null
+                          : () => unawaited(_setFilter(null)),
+                    ),
                   ],
+                  if (_caps.hdr10)
+                    _railAction(
+                      icon: _hdrEnabled
+                          ? Icons.hdr_on
+                          : Icons.hdr_off,
+                      label: 'HDR',
+                      iconColor:
+                          _hdrEnabled ? const Color(0xFF7DD3FC) : null,
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : _toggleHdr,
+                    ),
+                  if (_caps.manualWb)
+                    _railAction(
+                      icon: _wb.icon,
+                      label: 'WB',
+                      subtitle: _wb.label,
+                      iconColor: _wb == MinisWhiteBalancePreset.auto
+                          ? null
+                          : const Color(0xFF7DD3FC),
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : () => unawaited(_pickWhiteBalance()),
+                    ),
+                  if (_caps.slowMoFps.isNotEmpty)
+                    _railAction(
+                      icon: Icons.slow_motion_video,
+                      label: 'Slo-mo',
+                      subtitle: _slowMoFpsIdx < 0
+                          ? 'off'
+                          : '${_caps.slowMoFps[_slowMoFpsIdx]} fps',
+                      iconColor: _slowMoFpsIdx >= 0
+                          ? const Color(0xFF7DD3FC)
+                          : null,
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : _cycleSlowMo,
+                    ),
                   _railAction(
                     icon: eng?.isTorchOn == true
                         ? Icons.flash_on
@@ -3031,6 +4197,33 @@ class _MinisIndependentCaptureScreenState
                     onTap: (_busy || _recording || _countingDown)
                         ? null
                         : _toggleTorch,
+                  ),
+                  _railAction(
+                    icon: _gridVisible ? Icons.grid_on : Icons.grid_off,
+                    label: 'Grid',
+                    iconColor:
+                        _gridVisible ? const Color(0xFF7DD3FC) : null,
+                    onTap: (_busy || _countingDown)
+                        ? null
+                        : () {
+                            setState(() => _gridVisible = !_gridVisible);
+                            MinisCaptureSessionPrefs.instance.gridVisible =
+                                _gridVisible;
+                          },
+                  ),
+                  _railAction(
+                    icon: Icons.aspect_ratio,
+                    label: 'Frame',
+                    subtitle: _aspectRatio.shortLabel,
+                    iconColor: _aspectRatio == MinisAspectRatio.full
+                        ? null
+                        : const Color(0xFF7DD3FC),
+                    onTap: (_busy || _recording || _countingDown)
+                        ? null
+                        : () => unawaited(_pickAspectRatio()),
+                    onLongPress: (_busy || _recording || _countingDown)
+                        ? null
+                        : _cycleAspectRatio,
                   ),
                   _railAction(
                     icon: _micEnabled
@@ -3057,18 +4250,41 @@ class _MinisIndependentCaptureScreenState
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          '$_countdownTick',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 96,
-                            fontWeight: FontWeight.w200,
-                            height: 1,
-                          ),
+                        TweenAnimationBuilder<double>(
+                          key: ValueKey<int>(_countdownTick!),
+                          duration: const Duration(seconds: 1),
+                          curve: Curves.linear,
+                          tween: Tween<double>(begin: 1.0, end: 0.0),
+                          builder: (context, t, _) {
+                            return SizedBox(
+                              width: 168,
+                              height: 168,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  CustomPaint(
+                                    size: const Size(168, 168),
+                                    painter: _CountdownRingPainter(
+                                      progress: t,
+                                    ),
+                                  ),
+                                  Text(
+                                    '$_countdownTick',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 96,
+                                      fontWeight: FontWeight.w200,
+                                      height: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          'Tap to cancel',
+                          'Tap anywhere to cancel',
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.85),
                             fontSize: 14,
@@ -3078,6 +4294,48 @@ class _MinisIndependentCaptureScreenState
                     ),
                   ),
                 ),
+              ),
+            ),
+          if (eng != null && !_busy && _recording)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: bottomPad + 220,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.55),
+                        Colors.black.withValues(alpha: 0.0),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && !_countingDown && !_recording)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: bottomPad + 230,
+              child: Center(child: _buildZoomPresetRow()),
+            ),
+          if (eng != null &&
+              !_busy &&
+              !_countingDown &&
+              !_recording &&
+              _videoClips.isEmpty &&
+              !_shutterCoachmarkDismissed)
+            Positioned(
+              left: 24,
+              right: 24,
+              bottom: bottomPad + 190,
+              child: IgnorePointer(
+                child: Center(child: _buildShutterCoachmark()),
               ),
             ),
           Positioned(
@@ -3102,6 +4360,7 @@ class _MinisIndependentCaptureScreenState
                           child: _videoClips.isNotEmpty
                               ? _roundSecondaryButton(
                                   icon: Icons.undo,
+                                  semanticLabel: 'Remove last clip',
                                   onPressed: (_busy ||
                                           _recording ||
                                           _countingDown)
@@ -3112,6 +4371,8 @@ class _MinisIndependentCaptureScreenState
                                 )
                               : _roundSecondaryButton(
                                   icon: Icons.photo_library,
+                                  semanticLabel:
+                                      'Open gallery to import a clip',
                                   onPressed: (_busy ||
                                           _recording ||
                                           _countingDown)
@@ -3178,30 +4439,43 @@ class _MinisIndependentCaptureScreenState
                                       strokeWidth: _kRecordingRingStroke,
                                     ),
                                   ),
-                                  Listener(
-                                    onPointerDown: _onShutterPointerDown,
-                                    onPointerMove: _onShutterPointerMove,
-                                    onPointerUp: (_) =>
-                                        _onShutterPointerUpOrCancel(),
-                                    onPointerCancel: (_) =>
-                                        _onShutterPointerUpOrCancel(
-                                            cancelled: true),
-                                    child: AnimatedContainer(
-                                      duration: const Duration(milliseconds: 220),
-                                      curve: Curves.easeOutCubic,
-                                      width: _kShutterInner,
-                                      height: _kShutterInner,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: _recording
-                                            ? Colors.redAccent
-                                                .withValues(alpha: 0.22)
-                                            : Colors.white.withValues(alpha: 0.08),
+                                  Semantics(
+                                    button: true,
+                                    label: _recording
+                                        ? 'Stop recording'
+                                        : (widget.videoOnly
+                                            ? 'Hold to record video'
+                                            : 'Hold for video, tap for photo'),
+                                    hint: _recording
+                                        ? 'Tap to finish'
+                                        : 'Slide left to lock recording',
+                                    child: Listener(
+                                      onPointerDown: _onShutterPointerDown,
+                                      onPointerMove: _onShutterPointerMove,
+                                      onPointerUp: (_) =>
+                                          _onShutterPointerUpOrCancel(),
+                                      onPointerCancel: (_) =>
+                                          _onShutterPointerUpOrCancel(
+                                              cancelled: true),
+                                      child: AnimatedContainer(
+                                        duration:
+                                            const Duration(milliseconds: 220),
+                                        curve: Curves.easeOutCubic,
+                                        width: _kShutterInner,
+                                        height: _kShutterInner,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: _recording
+                                              ? Colors.redAccent
+                                                  .withValues(alpha: 0.22)
+                                              : Colors.white
+                                                  .withValues(alpha: 0.08),
+                                        ),
+                                        alignment: Alignment.center,
+                                        child: _recording
+                                            ? _buildRecordingStopIcon()
+                                            : null,
                                       ),
-                                      alignment: Alignment.center,
-                                      child: _recording
-                                          ? _buildRecordingStopIcon()
-                                          : null,
                                     ),
                                   ),
                                   if (_holdVideoArmed &&
@@ -3265,6 +4539,9 @@ class _MinisIndependentCaptureScreenState
                             _roundSecondaryButton(
                               icon: Icons.check,
                               filled: _canConfirmClip,
+                              semanticLabel: _canConfirmClip
+                                  ? 'Continue with this clip'
+                                  : 'Continue (disabled, no clip yet)',
                               onPressed: _canConfirmClip
                                   ? () => unawaited(_confirmClip())
                                   : null,
@@ -3295,6 +4572,7 @@ class _MinisIndependentCaptureScreenState
           ),
         ],
       ),
+    ),
     );
   }
 }
@@ -3314,5 +4592,924 @@ class _MinisBootPreviewMount extends StatelessWidget {
       return const UiKitView(viewType: _viewType);
     }
     return const AndroidView(viewType: _viewType);
+  }
+}
+
+/// Result returned from [_DeepArFilterSheet]. `filter == null` means the user
+/// chose the "None" tile (exit filter mode).
+class _FilterPick {
+  const _FilterPick(this.filter);
+  final DeepArFilter? filter;
+}
+
+class _DeepArFilterSheet extends StatelessWidget {
+  const _DeepArFilterSheet({required this.active});
+
+  final DeepArFilter? active;
+
+  @override
+  Widget build(BuildContext context) {
+    final mq = MediaQuery.of(context);
+    final height = (mq.size.height * 0.55).clamp(360.0, 620.0);
+
+    return SafeArea(
+      top: false,
+      child: SizedBox(
+        height: height,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+              child: Row(
+                children: <Widget>[
+                  const Icon(Icons.auto_awesome,
+                      color: Color(0xFF7DD3FC), size: 18),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text('DeepAR Filters',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white70),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: GridView.builder(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+                gridDelegate:
+                    const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  childAspectRatio: 0.78,
+                ),
+                itemCount: kDeepArFilters.length + 1,
+                itemBuilder: (ctx, i) {
+                  if (i == 0) {
+                    return _FilterTile(
+                      label: 'None',
+                      selected: active == null,
+                      onTap: () => Navigator.of(context)
+                          .pop(const _FilterPick(null)),
+                    );
+                  }
+                  final f = kDeepArFilters[i - 1];
+                  return _FilterTile(
+                    label: f.name,
+                    selected: active?.id == f.id,
+                    onTap: () =>
+                        Navigator.of(context).pop(_FilterPick(f)),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FilterTile extends StatelessWidget {
+  const _FilterTile({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  static const List<Color> _gradient = <Color>[
+    Color(0xFF1B2A3A),
+    Color(0xFF0E1A26),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final isNone = label == 'None';
+    final ring = selected
+        ? Border.all(color: const Color(0xFF7DD3FC), width: 2)
+        : Border.all(color: Colors.white12, width: 1);
+    final hue = label.hashCode & 0xFFFFFF;
+    final accent = Color(0xFF000000 | hue).withValues(alpha: 1.0);
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: isNone
+                    ? null
+                    : LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: <Color>[
+                          Color.alphaBlend(
+                              accent.withValues(alpha: 0.35), _gradient[0]),
+                          _gradient[1],
+                        ],
+                      ),
+                color: isNone ? const Color(0xFF1E1E1E) : null,
+                borderRadius: BorderRadius.circular(10),
+                border: ring,
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Center(
+                child: Icon(
+                  isNone ? Icons.block : Icons.auto_awesome,
+                  color: isNone
+                      ? Colors.white38
+                      : Colors.white.withValues(alpha: 0.85),
+                  size: 32,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: selected ? const Color(0xFF7DD3FC) : Colors.white,
+              fontSize: 11,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Modal sheet to pick a white-balance preset. Returns the chosen preset.
+class _WhiteBalanceSheet extends StatelessWidget {
+  const _WhiteBalanceSheet({required this.active});
+
+  final MinisWhiteBalancePreset active;
+
+  @override
+  Widget build(BuildContext context) {
+    const presets = MinisWhiteBalancePreset.values;
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.wb_iridescent,
+                  color: Color(0xFF7DD3FC),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'White balance',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final p in presets)
+                  _WbTile(
+                    preset: p,
+                    selected: p == active,
+                    onTap: () => Navigator.of(context).pop(p),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Auto lets the camera judge color temperature. Pick a preset for '
+              'consistent color across takes in the same lighting.',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.55),
+                fontSize: 11,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WbTile extends StatelessWidget {
+  const _WbTile({
+    required this.preset,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final MinisWhiteBalancePreset preset;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = (MediaQuery.sizeOf(context).width - 16 - 16 - 8 * 3) / 4;
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: Container(
+        width: size,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+        decoration: BoxDecoration(
+          color: selected
+              ? const Color(0xFF1B2A3A)
+              : const Color(0xFF111111),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected
+                ? const Color(0xFF7DD3FC)
+                : Colors.white12,
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              preset.icon,
+              color: selected ? const Color(0xFF7DD3FC) : Colors.white,
+              size: 22,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              preset.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: selected ? const Color(0xFF7DD3FC) : Colors.white,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (preset.kelvin != null)
+              Text(
+                '${preset.kelvin}K',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.5),
+                  fontSize: 9,
+                  height: 1.3,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Modal sheet to pick a recording speed multiplier. Returns the chosen index
+/// into the speed-step list; null = dismissed.
+class _SpeedSheet extends StatelessWidget {
+  const _SpeedSheet({required this.steps, required this.activeIndex});
+
+  final List<double> steps;
+  final int activeIndex;
+
+  String _formatStep(double v) {
+    final s = v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
+    return '${s}x';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.speed,
+                  color: Color(0xFF7DD3FC),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Recording speed',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                for (var i = 0; i < steps.length; i++) ...[
+                  Expanded(
+                    child: _SpeedChip(
+                      label: _formatStep(steps[i]),
+                      selected: i == activeIndex,
+                      onTap: () => Navigator.of(context).pop(i),
+                    ),
+                  ),
+                  if (i != steps.length - 1) const SizedBox(width: 8),
+                ],
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Speed applies to the whole take. Slower = longer max clip; '
+              'faster = shorter max clip.',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.55),
+                fontSize: 11,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SpeedChip extends StatelessWidget {
+  const _SpeedChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: AspectRatio(
+        aspectRatio: 1.1,
+        child: Container(
+          decoration: BoxDecoration(
+            color: selected
+                ? const Color(0xFF1B2A3A)
+                : const Color(0xFF111111),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selected
+                  ? const Color(0xFF7DD3FC)
+                  : Colors.white12,
+              width: selected ? 2 : 1,
+            ),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? const Color(0xFF7DD3FC) : Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Modal sheet to pick a framing aspect ratio. Each tile shows the rectangle
+/// at scale so the user can preview the safe area shape before applying.
+class _AspectRatioSheet extends StatelessWidget {
+  const _AspectRatioSheet({required this.active});
+
+  final MinisAspectRatio active;
+
+  @override
+  Widget build(BuildContext context) {
+    const choices = MinisAspectRatio.values;
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 18),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.aspect_ratio,
+                  color: Color(0xFF7DD3FC),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Framing guide',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                for (final c in choices) ...[
+                  Expanded(
+                    child: _AspectTile(
+                      aspect: c,
+                      selected: c == active,
+                      onTap: () => Navigator.of(context).pop(c),
+                    ),
+                  ),
+                  if (c != choices.last) const SizedBox(width: 8),
+                ],
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Engine continues to record its native frame; this overlay only '
+              'guides composition.',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.55),
+                fontSize: 11,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AspectTile extends StatelessWidget {
+  const _AspectTile({
+    required this.aspect,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final MinisAspectRatio aspect;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ratio = aspect.ratio ?? (9 / 16);
+    final isFull = aspect == MinisAspectRatio.full;
+    final border = selected
+        ? Border.all(color: const Color(0xFF7DD3FC), width: 2)
+        : Border.all(color: Colors.white12, width: 1);
+    return InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: onTap,
+      child: AspectRatio(
+        aspectRatio: 9 / 12,
+        child: Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF111111),
+            borderRadius: BorderRadius.circular(10),
+            border: border,
+          ),
+          padding: const EdgeInsets.all(8),
+          child: Column(
+            children: [
+              Expanded(
+                child: Center(
+                  child: AspectRatio(
+                    aspectRatio: ratio,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: isFull
+                            ? Colors.white24
+                            : Colors.white.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.55),
+                          width: 1,
+                        ),
+                      ),
+                      child: isFull
+                          ? const Center(
+                              child: Icon(
+                                Icons.fullscreen,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                            )
+                          : null,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                aspect.shortLabel,
+                style: TextStyle(
+                  color: selected ? const Color(0xFF7DD3FC) : Colors.white,
+                  fontSize: 12,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Inline warning pill — appears next to REC when user is recording with mic
+/// muted and no music guide. Reduces accidental silent takes.
+class _MicMutedPill extends StatelessWidget {
+  const _MicMutedPill();
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Microphone is muted',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xCC4D4D00),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: const Color(0xFFFFD96A),
+            width: 1,
+          ),
+        ),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.mic_off, color: Color(0xFFFFD96A), size: 14),
+              SizedBox(width: 6),
+              Text(
+                'Mic muted',
+                style: TextStyle(
+                  color: Color(0xFFFFD96A),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  height: 1,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Horizontal LED-style audio level meter. Shows RMS as a steady fill and
+/// the peak as a thin marker. Hidden when mic is muted.
+class _AudioLevelMeter extends StatelessWidget {
+  const _AudioLevelMeter({required this.levels});
+
+  final MinisAudioLevels levels;
+
+  @override
+  Widget build(BuildContext context) {
+    final rms = levels.rms.clamp(0.0, 1.0);
+    final peak = levels.peak.clamp(0.0, 1.0);
+    Color fillColor;
+    if (peak > 0.9) {
+      fillColor = Colors.redAccent;
+    } else if (peak > 0.7) {
+      fillColor = const Color(0xFFFFB347);
+    } else {
+      fillColor = const Color(0xFF7DD3FC);
+    }
+    return Semantics(
+      label: 'Audio level ${(peak * 100).round()} percent',
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.graphic_eq, color: Colors.white, size: 14),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 76,
+                height: 6,
+                child: Stack(
+                  children: [
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.white12,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ),
+                    FractionallySizedBox(
+                      widthFactor: rms,
+                      heightFactor: 1,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: fillColor,
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                      ),
+                    ),
+                    if (peak > 0.02)
+                      Positioned(
+                        left: (76 * peak).clamp(0.0, 76.0 - 2),
+                        top: 0,
+                        bottom: 0,
+                        width: 2,
+                        child: const ColoredBox(color: Colors.white),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Ring painter for the photo countdown overlay. Progress 1→0 over each tick
+/// so the ring depletes as the digit holds.
+class _CountdownRingPainter extends CustomPainter {
+  const _CountdownRingPainter({required this.progress});
+
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final r = size.shortestSide / 2 - 6;
+    final bg = Paint()
+      ..color = const Color(0x44FFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+    final fg = Paint()
+      ..color = const Color(0xFF7DD3FC)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, r, bg);
+    final sweep = -2 * math.pi * progress.clamp(0.0, 1.0);
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: r),
+      -math.pi / 2,
+      sweep,
+      false,
+      fg,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CountdownRingPainter oldDelegate) =>
+      oldDelegate.progress != progress;
+}
+
+/// Letterbox/safe-area overlay matching the chosen target aspect ratio.
+/// Dims areas the user shouldn't compose into; keeps the safe rect clear.
+class _AspectFramingPainter extends CustomPainter {
+  const _AspectFramingPainter(this.targetRatio);
+
+  final double targetRatio;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cw = size.width;
+    final ch = size.height;
+    if (cw <= 0 || ch <= 0) return;
+    final canvasRatio = cw / ch;
+    Rect safe;
+    if (canvasRatio > targetRatio) {
+      final w = ch * targetRatio;
+      final x = (cw - w) / 2;
+      safe = Rect.fromLTWH(x, 0, w, ch);
+    } else {
+      final h = cw / targetRatio;
+      final y = (ch - h) / 2;
+      safe = Rect.fromLTWH(0, y, cw, h);
+    }
+    final dim = Paint()..color = const Color(0x99000000);
+    final whole = Rect.fromLTWH(0, 0, cw, ch);
+    final outside = Path()
+      ..addRect(whole)
+      ..addRect(safe)
+      ..fillType = PathFillType.evenOdd;
+    canvas.drawPath(outside, dim);
+    final border = Paint()
+      ..color = const Color(0xCCFFFFFF)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    canvas.drawRect(safe, border);
+  }
+
+  @override
+  bool shouldRepaint(_AspectFramingPainter oldDelegate) =>
+      oldDelegate.targetRatio != targetRatio;
+}
+
+/// Tap-to-focus animated reticle. [progress] 0..1 drives shrink-in then fade.
+class _FocusReticlePainter extends CustomPainter {
+  const _FocusReticlePainter({required this.center, required this.progress});
+
+  final Offset center;
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final t = progress.clamp(0.0, 1.0);
+    final shrink = (1.0 - (t * 0.55)).clamp(0.45, 1.0);
+    final fade = t < 0.65 ? 1.0 : (1.0 - (t - 0.65) / 0.35).clamp(0.0, 1.0);
+    final radius = 42.0 * shrink;
+    final stroke = Paint()
+      ..color = Colors.white.withValues(alpha: 0.95 * fade)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6;
+    canvas.drawCircle(center, radius, stroke);
+    final tickPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.9 * fade)
+      ..strokeWidth = 1.4;
+    const tickLen = 6.0;
+    canvas.drawLine(
+      Offset(center.dx, center.dy - radius - 3),
+      Offset(center.dx, center.dy - radius - 3 - tickLen),
+      tickPaint,
+    );
+    canvas.drawLine(
+      Offset(center.dx, center.dy + radius + 3),
+      Offset(center.dx, center.dy + radius + 3 + tickLen),
+      tickPaint,
+    );
+    canvas.drawLine(
+      Offset(center.dx - radius - 3, center.dy),
+      Offset(center.dx - radius - 3 - tickLen, center.dy),
+      tickPaint,
+    );
+    canvas.drawLine(
+      Offset(center.dx + radius + 3, center.dy),
+      Offset(center.dx + radius + 3 + tickLen, center.dy),
+      tickPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_FocusReticlePainter oldDelegate) =>
+      oldDelegate.center != center || oldDelegate.progress != progress;
+}
+
+/// Lightweight composition aid: two vertical + two horizontal divider lines
+/// painted at thirds. Stays transparent enough to read the preview through it.
+class _RuleOfThirdsGridPainter extends CustomPainter {
+  const _RuleOfThirdsGridPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0x66FFFFFF)
+      ..strokeWidth = 0.7
+      ..style = PaintingStyle.stroke;
+    final w = size.width;
+    final h = size.height;
+    final x1 = w / 3;
+    final x2 = 2 * w / 3;
+    final y1 = h / 3;
+    final y2 = 2 * h / 3;
+    canvas.drawLine(Offset(x1, 0), Offset(x1, h), paint);
+    canvas.drawLine(Offset(x2, 0), Offset(x2, h), paint);
+    canvas.drawLine(Offset(0, y1), Offset(w, y1), paint);
+    canvas.drawLine(Offset(0, y2), Offset(w, y2), paint);
+  }
+
+  @override
+  bool shouldRepaint(_RuleOfThirdsGridPainter oldDelegate) => false;
+}
+
+/// Top-bar recording badge — pulsing red dot, "REC" label, and live elapsed
+/// time of the current session (clips already on rail + the active clip).
+class _RecPill extends StatelessWidget {
+  const _RecPill({required this.elapsedLabel, required this.pulse});
+
+  final String elapsedLabel;
+  final Animation<double> pulse;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: 'Recording, $elapsedLabel elapsed',
+      liveRegion: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.red.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(22),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedBuilder(
+                animation: pulse,
+                builder: (context, _) {
+                  final t = pulse.value;
+                  return Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white.withValues(alpha: 0.55 + 0.45 * t),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.white.withValues(alpha: 0.35 * t),
+                          blurRadius: 6 + 4 * t,
+                          spreadRadius: 0.5,
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                'REC',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                  height: 1,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                elapsedLabel,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                  height: 1,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

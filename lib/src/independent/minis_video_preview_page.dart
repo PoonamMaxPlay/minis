@@ -3,7 +3,6 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:loopit_minis/src/sys/paths.dart';
 import 'package:loopit_minis/src/sys/video_player_shim.dart';
 import 'package:loopit_minis/src/independent/minis_preview_player.dart';
 
@@ -118,7 +117,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
 
   bool get _isReady => _isMultiClip ? (_nativeController?.isInitialized == true) : (_controller?.value.isInitialized == true);
   bool get _isPlaying => _isMultiClip ? (_nativeController?.isPlaying == true) : (_controller?.value.isPlaying == true);
-  Duration get _currentPos => _isMultiClip ? (_nativeController?.position ?? Duration.zero) : (_controller?.value.position ?? Duration.zero);
   int get _currentDurMs => _isMultiClip ? (_nativeController?.duration.inMilliseconds ?? 0) : (_controller?.value.duration.inMilliseconds ?? 0);
   int get _totalDurMs {
     final p = _probedDurationMs ?? 0;
@@ -149,11 +147,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
     }
     if (ratio.isNaN || ratio.isInfinite || ratio <= 0) return 1.0;
     return ratio;
-  }
-
-  bool _isPathImage(String path) {
-    final ext = NativePaths.extension(path).toLowerCase();
-    return ext == '.jpg' || ext == '.jpeg' || ext == '.png' || ext == '.webp';
   }
 
   /// When set, preview reads this file; delete on dispose (not the handoff [_path]).
@@ -549,16 +542,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       _tempDecodePath = null;
     }
     super.dispose();
-  }
-
-  static String _formatDuration(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes.remainder(60);
-    final s = d.inSeconds.remainder(60);
-    if (h > 0) {
-      return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-    }
-    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   @override

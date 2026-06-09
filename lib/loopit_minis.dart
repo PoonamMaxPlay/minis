@@ -49,6 +49,7 @@ export 'package:loopit_minis/src/imgedit/image_edit_channel.dart'
         MinisImageStickerPack,
         MinisImageEditEvent,
         MinisImageEditException;
+export 'package:loopit_minis/src/audio/minis_audio.dart' hide MinisAudioLevels;
 export 'package:loopit_minis/src/sys/sys.dart';
 export 'package:loopit_minis/src/telemetry/minis_telemetry.dart'
     show MinisTelemetry, MinisTelemetryEvent, TelemetrySink;

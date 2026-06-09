@@ -1,0 +1,78 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-RelWithDebInfo-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "RelWithDebInfo",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "minis_native",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "minis_audio_aaudio::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-minis_audio_aaudio-RelWithDebInfo-13843c7c2cd702c85526.json",
+					"name" : "minis_audio_aaudio",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "minis_camera_pipeline::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-minis_camera_pipeline-RelWithDebInfo-a6f205f0a310b7007e08.json",
+					"name" : "minis_camera_pipeline",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "minis_imgedit::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-minis_imgedit-RelWithDebInfo-f2500646977cee14cfc2.json",
+					"name" : "minis_imgedit",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/arm64-v8a",
+		"source" : "/Volumes/KRYPTIX/test/minis/android/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

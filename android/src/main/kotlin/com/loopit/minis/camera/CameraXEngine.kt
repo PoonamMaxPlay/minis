@@ -136,16 +136,30 @@ class CameraXEngine(
 
     fun attachPrimaryPreview(view: PreviewView) {
         mainHandler.post {
+            if (primaryPreview === view) return@post
             primaryPreview = view
-            tryRebind()
+            // When use-cases are already wired from an earlier preview mount,
+            // a full rebind would cancel the working SurfaceRequest and freeze
+            // the new TextureView on its black background. Instead, redirect
+            // the existing Preview use-case's surface provider to the new view
+            // so frames start flowing into the freshly mounted PlatformView.
+            val pu = previewUseCase
+            if (pu != null) {
+                pu.setSurfaceProvider(view.surfaceProvider)
+            } else {
+                tryRebind()
+            }
         }
     }
 
     fun detachPrimaryPreview(view: PreviewView) {
         mainHandler.post {
             if (primaryPreview === view) primaryPreview = null
-            runCatching { cameraProvider?.unbindAll() }
-            clearUseCases()
+            // Don't unbind the camera here — a fresh PreviewView is usually
+            // attached immediately afterwards (PlatformView lifecycle churn)
+            // and we want the next bind() to just swap surface providers
+            // instead of tearing the whole session down + back up. The full
+            // teardown still happens via `release()` on plugin detach.
         }
     }
 
@@ -252,6 +266,17 @@ class CameraXEngine(
             val cp = cameraProvider ?: run { onDone(IllegalStateException("not warmed")); return@post }
             qualityTierState = qualityTier
             recordWithAudioEnabled = enableAudio
+            // Idempotent guard: when `attachPrimaryPreview` already kicked off a
+            // tryRebind (because warmUp finished before the PlatformView was
+            // mounted) the use-cases are already wired. Re-binding here would
+            // call `provider.unbindAll()` and cancel the working preview
+            // SurfaceRequest, leaving the TextureView frozen on its black
+            // background. Skip the second bind in that case.
+            if (previewUseCase != null && videoCaptureUseCase != null) {
+                session.transition(CameraSession.State.PREVIEW)
+                onDone(null)
+                return@post
+            }
             try {
                 bindUseCases(act, cp, pv)
                 session.transition(CameraSession.State.PREVIEW)

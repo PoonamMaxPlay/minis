@@ -31,7 +31,12 @@ else
 fi
 
 ABIS=(${ABIS:-arm64-v8a armeabi-v7a x86_64 x86})
-API="${API:-26}"
+# Bionic only supports TLS access from dlopen-loaded shared libraries starting
+# at API 29 (Android 10). Below that, libavutil.so fails with
+# "TLS symbol (null) ... using IE access model" because the dynamic linker
+# rejects TPREL relocs in dlopen()ed modules. Targeting API 29 makes clang
+# emit TLSDESC sequences that bionic resolves cleanly at dlopen time.
+API="${API:-29}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SRC="$ROOT/external"
 OUT="$ROOT/out"
@@ -87,13 +92,28 @@ for ABI in "${ABIS[@]}"; do
   export PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig"
   export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 
+  # Force emulated TLS across every dep + FFmpeg itself. Native arm64 TLS in a
+  # dlopen-loaded shared library only works on API ≥ 29; we target API 26.
+  # Without -femulated-tls clang emits R_AARCH64_TLS_TPREL64 relocs that set
+  # the STATIC_TLS DT flag and Android's dynamic linker refuses the lib with:
+  #   "TLS symbol (null) ... using IE access model".
+  # Emulated TLS converts every thread-local access into a function call
+  # (__emutls_get_address). On its own this still leaves the compiler-emitted
+  # `mrs TPIDR_EL0` sequence used for `__stack_chk_guard`, whose TLS slot is
+  # uninitialised when libavutil's constructors run, so the SSP probe in init
+  # code crashes (SIGSEGV in __dl_call_constructors). Disabling the stack
+  # protector kills both sources of TPIDR-based TLS lookups, letting the lib
+  # load + initialise on Android's dlopen path.
+  TLS_CFLAGS="-femulated-tls -fno-stack-protector"
+
   # ── x264 ────────────────────────────────────────────────
   pushd "$SRC/x264" >/dev/null
   make clean >/dev/null 2>&1 || true
   CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
   ./configure --prefix="$PREFIX" --host="$TARGET" \
     --enable-pic --enable-static --disable-cli \
-    --disable-asm
+    --disable-asm \
+    --extra-cflags="$TLS_CFLAGS"
   make -j"$JOBS"
   make install
   popd >/dev/null
@@ -103,19 +123,43 @@ for ABI in "${ABIS[@]}"; do
   mkdir -p "$X265_BUILD"
   pushd "$X265_BUILD" >/dev/null
   cmake -G Ninja "$SRC/x265/source" \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ABI" -DANDROID_PLATFORM="android-$API" \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_C_FLAGS="$TLS_CFLAGS" -DCMAKE_CXX_FLAGS="$TLS_CFLAGS" \
     -DENABLE_SHARED=OFF -DENABLE_CLI=OFF -DENABLE_ASSEMBLY=OFF
   ninja
   ninja install
   popd >/dev/null
+
+  # x265 master gates pkgconfig generation behind X265_LATEST_TAG. Shallow
+  # clones don't satisfy that, so synthesize x265.pc when missing so ffmpeg's
+  # pkg-config lookup succeeds.
+  if [[ ! -f "$PREFIX/lib/pkgconfig/x265.pc" ]]; then
+    mkdir -p "$PREFIX/lib/pkgconfig"
+    cat > "$PREFIX/lib/pkgconfig/x265.pc" <<EOF
+prefix=$PREFIX
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: x265
+Description: H.265/HEVC video encoder
+Version: 4.0
+Libs: -L\${libdir} -lx265
+Libs.private: -lm -ldl -lc++_shared
+Cflags: -I\${includedir}
+EOF
+  fi
 
   # ── fdk-aac ─────────────────────────────────────────────
   pushd "$SRC/fdk-aac" >/dev/null
   make clean >/dev/null 2>&1 || true
   ./autogen.sh
   CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" \
+  CPPFLAGS="-D__ANDROID_NDK__=1" \
+  CFLAGS="$TLS_CFLAGS" CXXFLAGS="$TLS_CFLAGS" \
   ./configure --prefix="$PREFIX" --host="$TARGET" \
     --enable-static --disable-shared --with-pic
   make -j"$JOBS"
@@ -127,6 +171,7 @@ for ABI in "${ABIS[@]}"; do
   make clean >/dev/null 2>&1 || true
   ./autogen.sh
   CC="$CC" AR="$AR" RANLIB="$RANLIB" \
+  CFLAGS="$TLS_CFLAGS" \
   ./configure --prefix="$PREFIX" --host="$TARGET" \
     --enable-static --disable-shared --with-pic \
     --disable-doc --disable-extra-programs
@@ -147,8 +192,8 @@ for ABI in "${ABIS[@]}"; do
   CROSS="${TOOLCHAIN}/bin/llvm-" \
   ./configure --prefix="$PREFIX" --target="$VPX_TARGET" \
     --enable-pic --enable-vp9 --enable-vp8 \
-    --disable-examples --disable-tools --disable-docs --disable-unit-tests \
-    --sdk-path="$NDK"
+    --extra-cflags="$TLS_CFLAGS" \
+    --disable-examples --disable-tools --disable-docs --disable-unit-tests
   make -j"$JOBS"
   make install
   popd >/dev/null
@@ -170,7 +215,7 @@ for ABI in "${ABIS[@]}"; do
     --enable-swscale --enable-swresample --enable-postproc --enable-network \
     --enable-protocol=file,pipe,concat,data,async,subfile \
     --enable-libx264 --enable-libx265 --enable-libfdk-aac \
-    --enable-libopus --enable-libvpx --enable-nonfree \
+    --enable-libopus --enable-libvpx --enable-gpl --enable-nonfree \
     --enable-mediacodec --enable-jni \
     --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata \
     --enable-parser=h264,hevc,vp9,aac,opus,mpeg4video \
@@ -179,9 +224,9 @@ for ABI in "${ABIS[@]}"; do
     --enable-muxer=mp4,mov,matroska,webm,gif,image2,wav,null \
     --enable-encoder=h264_mediacodec,hevc_mediacodec,libx264,libx265,aac,libfdk_aac,libopus,libvpx_vp9,prores_ks,gif,png,mjpeg,pcm_s16le \
     --enable-decoder=h264,hevc,vp9,vp8,av1,aac,opus,mp3,vorbis,mjpeg,pcm_s16le,gif,png \
-    --extra-cflags="-O3 -fPIC -DANDROID -I$PREFIX/include" \
-    --extra-ldflags="-L$PREFIX/lib" \
-    --extra-libs="-lm -lz" \
+    --extra-cflags="-O3 -fPIC -DANDROID $TLS_CFLAGS -I$PREFIX/include" \
+    --extra-ldflags="-L$PREFIX/lib -L$TOOLCHAIN/sysroot/usr/lib/$TARGET" \
+    --extra-libs="-lm -lz -lc++_shared" \
     --pkg-config=pkg-config
   make -j"$JOBS"
   make install
@@ -202,6 +247,17 @@ for ABI in "${ABIS[@]}"; do
       echo "warn: $src missing"
     fi
   done
+
+  # Strip out the lone leftover R_AARCH64_TLS_TPREL64 reloc + STATIC_TLS flag.
+  # The compiler-rt builtin chain pulls in a single 8-byte __thread variable
+  # used by exception unwinding; FFmpeg never reaches that code path, but its
+  # presence makes Android's dynamic linker refuse dlopen ("TLS symbol (null)
+  # using IE access model"). Neutralising the reloc lets the lib load.
+  if [[ -f "$ROOT/strip_tls_reloc.py" ]]; then
+    for so in "$ABI_OUT"/lib*.so; do
+      python3 "$ROOT/strip_tls_reloc.py" "$so" >/dev/null 2>&1 || true
+    done
+  fi
 
   echo "✅ $ABI complete → $ABI_OUT"
 done

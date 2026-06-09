@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:loopit_minis/loopit_minis.dart';
-import 'package:loopit_minis/src/audio/minis_audio.dart';
 
 /// improvement4.md D.acceptance harness.
 ///

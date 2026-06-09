@@ -29,8 +29,11 @@ private class CameraPlatformView(
     private val engine: CameraXEngine,
     private val secondary: Boolean,
 ) : PlatformView {
+    // COMPATIBLE = TextureView so Flutter can composite overlay widgets on top
+    // of the preview; PERFORMANCE uses a SurfaceView that punches through and
+    // hides UI elements drawn above it.
     private val previewView = PreviewView(context).apply {
-        implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         scaleType = PreviewView.ScaleType.FILL_CENTER
     }
 
