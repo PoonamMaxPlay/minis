@@ -17,6 +17,7 @@ export 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 export 'package:loopit_minis/src/independent/minis_video_duration.dart';
 export 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
 export 'package:loopit_minis/src/minis_capture_host.dart';
+export 'package:loopit_minis/src/minis_log.dart';
 export 'package:loopit_minis/src/minis_handoff.dart';
 export 'package:loopit_minis/src/minis_handoff_widgets.dart';
 export 'package:loopit_minis/src/minis_processing_service.dart';

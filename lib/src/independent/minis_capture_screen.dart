@@ -32,6 +32,7 @@ import 'package:loopit_minis/src/minis_handoff.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
+import 'package:loopit_minis/src/minis_log.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
 import 'package:phosphor_flutter/phosphor_flutter.dart';
 
@@ -201,6 +202,11 @@ class _MinisIndependentCaptureScreenState
   bool _ownEngine = false;
   bool _webUnsupported = false;
   bool _permissionDenied = false;
+  // Which permission(s) the denial screen should name, and whether the OS
+  // will even re-prompt ("Don't allow" → only Settings can fix it).
+  bool _permCameraDenied = false;
+  bool _permMicDenied = false;
+  bool _permPermanentlyDenied = false;
   bool _busy = true;
   /// Shown under the spinner when [_busy] is true (gallery, merge, camera ops).
   String _busyMessage = '';
@@ -327,9 +333,16 @@ class _MinisIndependentCaptureScreenState
       final cam = await Permission.camera.request();
       final mic = await Permission.microphone.request();
       if (!cam.isGranted || !mic.isGranted) {
+        MinisLog.w(
+          'capture permission denied: camera=${cam.name} mic=${mic.name}',
+        );
         if (mounted) {
           setState(() {
             _permissionDenied = true;
+            _permCameraDenied = !cam.isGranted;
+            _permMicDenied = !mic.isGranted;
+            _permPermanentlyDenied =
+                cam.isPermanentlyDenied || mic.isPermanentlyDenied;
             _busy = false;
             _busyMessage = '';
           });
@@ -339,6 +352,15 @@ class _MinisIndependentCaptureScreenState
     }
 
     try {
+      // Let the previous capture's camera finish releasing before grabbing
+      // it again (the platform frees it asynchronously after dispose).
+      final pending = _pendingEngineDispose;
+      if (pending != null) {
+        await pending.timeout(const Duration(seconds: 3), onTimeout: () {});
+        if (identical(pending, _pendingEngineDispose)) {
+          _pendingEngineDispose = null;
+        }
+      }
       if (widget.engine == null && _ownEngine && _engine == null) {
         _engine = await createMinisEngineAfterPermission(
           performanceMode: widget.cameraPerformanceMode,
@@ -356,7 +378,7 @@ class _MinisIndependentCaptureScreenState
       }
       await _applyInitialMusicPrefillIfAny();
     } catch (e, st) {
-      debugPrint('MinisIndependentCaptureScreen init failed: $e\n$st');
+      MinisLog.w('capture engine init failed', e, st);
       if (mounted) {
         setState(() {
           _error = minisUserFriendlyException(e);
@@ -524,6 +546,11 @@ class _MinisIndependentCaptureScreenState
     await _prepareGuideMusic();
   }
 
+  /// Camera teardown is async on the platform side; opening the next capture
+  /// before the previous engine finished releasing can hit "camera in use"
+  /// errors. dispose() parks its future here and the next _boot awaits it.
+  static Future<void>? _pendingEngineDispose;
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -540,7 +567,14 @@ class _MinisIndependentCaptureScreenState
     unawaited(_manageAudioSession(false));
     unawaited(_disposeGuideMusic().catchError((_) {}));
     if (_ownEngine) {
-      unawaited(_engine?.dispose());
+      final eng = _engine;
+      if (eng != null) {
+        final f = eng.dispose().catchError((Object e) {
+          MinisLog.w('capture engine dispose failed', e);
+        });
+        _pendingEngineDispose = f;
+        unawaited(f);
+      }
     }
     super.dispose();
   }
@@ -757,6 +791,42 @@ class _MinisIndependentCaptureScreenState
     if (mounted) setState(() => _musicSegment = null);
     await _deleteMusicSegmentFile(oldSeg);
     _toast('Music cleared');
+  }
+
+  /// Recorded clips / picked music live only in this State — popping the
+  /// screen discards them, so leaving must be confirmed.
+  bool get _hasUnsavedCapture =>
+      _videoClips.isNotEmpty || _musicSegment != null;
+
+  Future<void> _confirmExitCapture() async {
+    if (!mounted) return;
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Discard your recording?'),
+        content: Text(
+          _videoClips.isEmpty
+              ? 'Your selected music will be lost.'
+              : 'You recorded ${_videoClips.length} '
+                  'clip${_videoClips.length == 1 ? '' : 's'}. '
+                  'Going back will delete '
+                  '${_videoClips.length == 1 ? 'it' : 'them'}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep recording'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (discard == true && mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   /// Short label for the right rail (single line, fixed-width column).
@@ -1096,7 +1166,8 @@ class _MinisIndependentCaptureScreenState
       final out = dest.path.replaceAll('\\', '/');
       _logGallery('materialize OK out=${p.basename(out)}');
       return out;
-    } catch (e) {
+    } catch (e, st) {
+      MinisLog.w('gallery video materialize failed', e, st);
       _logGallery('materialize failed: $e');
       return null;
     }
@@ -1309,7 +1380,7 @@ class _MinisIndependentCaptureScreenState
     try {
       materialized = await _materializePickedVideoForPreview(sourcePath);
     } catch (e, st) {
-      debugPrint('minis materialize: $e\n$st');
+      MinisLog.w('gallery import materialize threw', e, st);
       if (mounted) {
         _toast(minisUserFriendlyException(e));
       }
@@ -1805,6 +1876,11 @@ class _MinisIndependentCaptureScreenState
       _toast('Gallery is for Android / iOS builds.');
       return;
     }
+    // The system picker can take seconds to appear on slow devices; show the
+    // busy overlay immediately so the tap visibly registered. The finally
+    // below clears it once the picker is done unless a later stage (import /
+    // save) has already replaced it with its own message.
+    _applyBusy(true, message: 'Opening gallery…');
     try {
       if (!kIsWeb &&
           (defaultTargetPlatform == TargetPlatform.android ||
@@ -1892,10 +1968,15 @@ class _MinisIndependentCaptureScreenState
         }
       }
     } catch (e, st) {
+      MinisLog.w('gallery pick failed', e, st);
       _logMulticlip('Gallery error: $e\n$st');
       if (mounted) {
         _applyBusy(false);
         _toast(minisUserFriendlyException(e));
+      }
+    } finally {
+      if (mounted && _busy && _busyMessage == 'Opening gallery…') {
+        _applyBusy(false);
       }
     }
   }
@@ -2907,10 +2988,23 @@ class _MinisIndependentCaptureScreenState
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'Camera and microphone permission are required to record.',
+                Text(
+                  _permCameraDenied && _permMicDenied
+                      ? 'Camera and microphone permission are required to record.'
+                      : _permCameraDenied
+                          ? 'Camera permission is required to record.'
+                          : 'Microphone permission is required to record sound.',
                   textAlign: TextAlign.center,
                 ),
+                if (_permPermanentlyDenied) ...[
+                  const SizedBox(height: 8),
+                  const Text(
+                    'You chose "Don\'t allow", so the system won\'t ask '
+                    'again — enable it via Open settings.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ],
                 const SizedBox(height: 20),
                 FilledButton(
                   onPressed: () async {
@@ -2961,7 +3055,14 @@ class _MinisIndependentCaptureScreenState
     final topPad = MediaQuery.paddingOf(context).top;
     final bottomPad = MediaQuery.paddingOf(context).bottom;
 
-    return Scaffold(
+    // Recorded clips / picked music are in-memory only — leaving this screen
+    // throws them away, so back (button or gesture) must confirm first.
+    return PopScope(
+      canPop: !_hasUnsavedCapture,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) unawaited(_confirmExitCapture());
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
@@ -3073,7 +3174,9 @@ class _MinisIndependentCaptureScreenState
                       onPressed: () {
                         final nav = Navigator.maybeOf(context);
                         if (nav != null && nav.canPop()) {
-                          nav.pop();
+                          // maybePop routes through PopScope so the
+                          // discard-recording confirm can intercept.
+                          unawaited(nav.maybePop());
                         }
                       },
                       icon: const PhosphorIcon(
@@ -3491,6 +3594,7 @@ class _MinisIndependentCaptureScreenState
             ),
           ),
         ],
+      ),
       ),
     );
   }

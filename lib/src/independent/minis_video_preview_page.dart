@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:path/path.dart' as p;
 
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:loopit_minis/src/independent/minis_preview_player.dart';
@@ -12,6 +13,7 @@ import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
+import 'package:loopit_minis/src/minis_log.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
 
 /// Result of confirming [MinisVideoPreviewPage] — includes **durationMs** from
@@ -166,9 +168,39 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   bool _isSwitchingVideo = false;
   int? _probedDurationMs;
 
+  /// Switch audio session to playback mode so the preview player can be heard
+  /// even when the caller (e.g. MinisIndependentCaptureScreen) left the session
+  /// in videoRecording mode with duckOthers / exclusive focus.
+  Future<void> _activatePlaybackAudioSession() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        avAudioSessionCategoryOptions: AVAudioSessionCategoryOptions.duckOthers,
+        avAudioSessionMode: AVAudioSessionMode.moviePlayback,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.movie,
+          usage: AndroidAudioUsage.media,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+      ));
+      await session.setActive(true);
+    } catch (e) {
+      MinisLog.w('MinisVideoPreviewPage: audio session activate failed', e);
+    }
+  }
+
+  Future<void> _deactivatePlaybackAudioSession() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.setActive(false);
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
+    unawaited(_activatePlaybackAudioSession());
     _paths = widget.videoPaths;
     _currentIndex = 0;
     _path = _paths[_currentIndex];
@@ -316,6 +348,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
           await File(filePath).delete();
         } catch (_) {}
       }
+      MinisLog.w('preview playback failed for ${p.basename(filePath)}', e);
       setState(() {
         _playbackErrorText = minisUserFriendlyException(e, context: 'playback');
       });
@@ -548,6 +581,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       } catch (_) {}
       _tempDecodePath = null;
     }
+    unawaited(_deactivatePlaybackAudioSession());
     super.dispose();
   }
 
