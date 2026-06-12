@@ -11,6 +11,7 @@ import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
+import 'package:loopit_minis/src/minis_log.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
 
 /// Result of confirming [MinisVideoPreviewPage] — includes **durationMs** from
@@ -304,6 +305,7 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
           await File(filePath).delete();
         } catch (_) {}
       }
+      MinisLog.w('preview playback failed for ${p.basename(filePath)}', e);
       setState(() {
         _playbackErrorText = minisUserFriendlyException(e, context: 'playback');
       });

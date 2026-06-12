@@ -11,7 +11,12 @@ import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:path/path.dart' as p;
 import 'package:video_trimmer/video_trimmer.dart';
 
-/// Trim feature is currently disabled (hidden for this release).
+/// DELIBERATE FEATURE FLAG — the in-preview Trim button is hidden for this
+/// release. [MinisReelClipTrimmerPage] below is fully implemented and wired
+/// (preview page checks this gate before showing its Trim action); to ship
+/// the feature, restore the platform check:
+///   `!kIsWeb && (Android || iOS)`
+/// Do not delete the page — this gate is the only thing turning it off.
 bool minisReelClipTrimmerPlatformSupported() => false;
 
 /// Path and duration from [MinisReelClipTrimmerPage] save.

@@ -11,6 +11,7 @@ import 'package:pro_video_editor/pro_video_editor.dart';
 import 'package:loopit_minis/src/debug/video_aspect_log.dart';
 import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/minis_capture_host.dart';
+import 'package:loopit_minis/src/minis_log.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:video_player/video_player.dart' as vp;
@@ -38,8 +39,8 @@ Future<List<String>> _sanitizeClipPathsForIos(List<String> paths) async {
         result.add(dest);
         // Best-effort cleanup of source.
         try { await File(path).delete(); } catch (_) {}
-      } catch (e) {
-        dev.log('minis: clip copy failed for $path: $e', name: 'MinisMerge');
+      } catch (e, st) {
+        MinisLog.w('iOS clip sanitize copy failed', e, st);
         result.add(path); // fallback to original
       }
     } else {
@@ -65,8 +66,8 @@ Future<String> _copyToDocumentsIfIos(String cachePath) async {
     await File(cachePath).copy(dest);
     try { await File(cachePath).delete(); } catch (_) {}
     return dest;
-  } catch (e) {
-    dev.log('minis: cache→docs copy failed: $e', name: 'MinisMerge');
+  } catch (e, st) {
+    MinisLog.w('iOS cache→docs copy failed', e, st);
     return cachePath; // fallback
   }
 }
@@ -226,9 +227,10 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   } on RenderCanceledException {
     return null;
   } catch (e, st) {
-    dev.log('minis merge failed: $e', error: e, stackTrace: st, name: 'MinisMerge');
+    MinisLog.w('clip merge failed (${clipPaths.length} clips)', e, st);
     if (clipPaths.length == 1) {
-      dev.log('minis merge fallback to original clip', name: 'MinisMerge');
+      // The raw clip plays, but the requested speed/music/mute is LOST.
+      MinisLog.w('merge fallback to original clip — speed/music not applied');
       return clipPaths.first;
     }
     rethrow;
@@ -312,9 +314,11 @@ Future<String?> mergeMinisVideoClipsSilent({
     return null;
   } catch (e, st) {
     await progressSub?.cancel();
-    dev.log('minis merge silent failed: $e', error: e, stackTrace: st, name: 'MinisMerge');
+    MinisLog.w('silent clip merge failed (${clipPaths.length} clips)', e, st);
     if (clipPaths.length == 1) {
-      dev.log('minis merge silent fallback to original clip', name: 'MinisMerge');
+      // The raw clip plays, but the requested speed/music/mute is LOST.
+      MinisLog.w(
+          'silent merge fallback to original clip — speed/music not applied');
       return clipPaths.first;
     }
     if (MinisCaptureHost.hasHandoffOverlay) {
