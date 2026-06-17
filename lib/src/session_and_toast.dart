@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 /// Shown when the user enters the reel (Mini) camera section.
-const String kMinisEditorToastMessage = 'Minis video tools';
+const String kMinisEditorToastMessage = 'Video tools';
 
 /// Simple dark pill at the **top** (safe area), non-blocking. Replaces default
 /// bottom [SnackBar] toasts for Minis flows.

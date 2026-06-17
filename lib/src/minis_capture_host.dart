@@ -71,7 +71,7 @@ abstract final class MinisCaptureHost {
     _builder = null;
     _musicPicker = null;
     _captureResultCompleter = null;
-    _handoffOverlayEntry = null;
+    dismissHandoffOverlay();
     _handoffProgress.value = null;
     _handoffError.value = null;
   }
@@ -85,7 +85,7 @@ abstract final class MinisCaptureHost {
   static void _snack(String message) {
     try {
       Get.snackbar(
-        'Minis',
+        'Camera',
         message,
         snackPosition: SnackPosition.TOP,
         duration: const Duration(seconds: 3),
@@ -117,7 +117,7 @@ abstract final class MinisCaptureHost {
     }
     if (_captureResultCompleter != null &&
         !(_captureResultCompleter?.isCompleted ?? true)) {
-      _snack('Minis is already open. Close it first, then try again.');
+      _snack('Camera is already open. Close it first, then try again.');
       return Future<T?>.value(null);
     }
     final completer = Completer<Object?>();
@@ -229,7 +229,7 @@ abstract final class MinisCaptureHost {
                         progress: progress,
                         message: progress != null
                             ? 'Processing video…'
-                            : 'Preparing minis…',
+                            : 'Preparing…',
                       ),
                     );
                   },

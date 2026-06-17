@@ -101,6 +101,8 @@ class MinisPreviewPlayerController extends ChangeNotifier {
     _disposed = true;
     _positionTimer?.cancel();
     _channel?.setMethodCallHandler(null);
+    // Tell the native side to release its player/surface resources.
+    _channel?.invokeMethod('dispose').catchError((_) {});
     super.dispose();
   }
 }

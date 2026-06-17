@@ -130,7 +130,9 @@ class CameraPluginMinisEngine implements MinisCameraEnginePort {
 
   @override
   Future<void> dispose() async {
-    await _controller?.dispose();
+    try {
+      await _controller?.dispose();
+    } catch (_) {}
     _controller = null;
     _torchOn = false;
   }

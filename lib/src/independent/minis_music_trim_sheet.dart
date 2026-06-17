@@ -46,8 +46,8 @@ Future<MinisMusicSegment?> showMinisMusicTimingSheet(
   return showModalBottomSheet<MinisMusicSegment>(
     context: context,
     isScrollControlled: true,
-    isDismissible: false,
-    enableDrag: false,
+    isDismissible: true,
+    enableDrag: true,
     backgroundColor: Colors.transparent,
     builder: (ctx) {
       final h = (MediaQuery.sizeOf(ctx).height * 0.58).clamp(360.0, 560.0);
@@ -644,8 +644,11 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
     _completionSub?.cancel();
     _scrollController.removeListener(_onScrollChanged);
     _scrollController.dispose();
-    unawaited(_audioPlayer.pausePlayer());
-    unawaited(_audioPlayer.release());
+    unawaited(
+      _audioPlayer.pausePlayer().catchError((_) {}).then((_) {
+        _audioPlayer.release().catchError((_) {});
+      }),
+    );
     _audioPlayer.dispose();
     // Clean up the temp audio copy if one was created.
     final tempPath = _playbackPath;
@@ -742,7 +745,7 @@ class _MinisLoopStyleMusicSheetState extends State<_MinisLoopStyleMusicSheet> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Drag the full waveform; the purple band is your minis cap. '
+                  'Drag the full waveform; the purple band is your time limit. '
                   'The start time (above) moves as you scroll. Tap play to preview.',
                   style: theme.textTheme.bodySmall,
                 ),

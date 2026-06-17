@@ -25,7 +25,6 @@ import 'package:loopit_minis/src/independent/minis_music_trim_sheet.dart';
 import 'package:loopit_minis/src/independent/minis_recording_clip.dart';
 import 'package:loopit_minis/src/independent/minis_recording_ring_painter.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
-import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
 import 'package:loopit_minis/src/independent/minis_video_preview_page.dart';
 import 'package:loopit_minis/src/minis_handoff.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
@@ -377,7 +376,12 @@ class _MinisIndependentCaptureScreenState
   }
 
   Future<void> _retryCameraInit() async {
-    if (_webUnsupported || _engine == null) return;
+    if (_webUnsupported) return;
+    if (_engine == null) {
+      // Engine factory failed during _boot(); re-run the full boot sequence.
+      await _boot();
+      return;
+    }
     setState(() {
       _error = null;
       _busy = true;
@@ -1396,7 +1400,7 @@ class _MinisIndependentCaptureScreenState
     final remainingMs =
         _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
     if (remainingMs < 500) {
-      _toast('No time left in this mini.');
+      _toast('No time left.');
       try {
         await File(materialized).delete();
       } catch (_) {}
@@ -1441,7 +1445,7 @@ class _MinisIndependentCaptureScreenState
       }
       final remSec = (remainingMs / 1000).ceil();
       _toast(
-        'Trim which ${remSec}s or less to add (${remSec}s left in this mini).',
+        'Trim to ${remSec}s or less to add (${remSec}s left).',
       );
       if (!mounted) return;
       _applyBusy(true, message: 'Opening trim…');
@@ -1467,7 +1471,7 @@ class _MinisIndependentCaptureScreenState
       }
       final outMs = trimOut.durationMs;
       if (outMs <= 0 || _clipsTotalDurationMs + outMs > _sessionCapMs) {
-        _toast('Trimmed segment does not fit this mini.');
+        _toast('Trimmed segment is too long.');
         try {
           await File(trimOut.path).delete();
         } catch (_) {}
@@ -1783,7 +1787,7 @@ class _MinisIndependentCaptureScreenState
         _logMulticlip(
           'REJECT: over cap after preview (sum=$sum cap=$cap) — should be rare',
         );
-        _toast('That clip no longer fits the time limit for this mini. Try again.');
+        _toast('That clip exceeds the time limit. Try again.');
         return;
       }
       _logMulticlip('calling _appendVideoSegment');
@@ -2161,7 +2165,7 @@ class _MinisIndependentCaptureScreenState
           unawaited(
             _stopRecordingInternal(
               userMessage:
-                  'Max minis time reached for this segment ($_speedRailLabel)',
+                  'Max time reached for this segment ($_speedRailLabel)',
             ),
           );
         }

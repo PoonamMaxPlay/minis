@@ -6,10 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
-import 'package:loopit_minis/src/native_video_trim_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 import 'package:path/path.dart' as p;
-import 'package:video_trimmer/video_trimmer.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:retrytech_plugin/retrytech_plugin.dart';
+import 'package:video_player/video_player.dart';
 
 /// DELIBERATE FEATURE FLAG — the in-preview Trim button is hidden for this
 /// release. [MinisReelClipTrimmerPage] below is fully implemented and wired
@@ -73,53 +74,40 @@ class MinisReelClipTrimmerPage extends StatefulWidget {
 }
 
 class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
-  final Trimmer _trimmer = Trimmer();
+  VideoPlayerController? _controller;
 
-  /// Current file (may be re-encoded to H.264 if the source could not open).
   late File _activeVideoFile;
-
-  /// Re-encode output path, deleted on success handoff, cancel, or retry from original.
   String? _repairTempPath;
   bool _h264RepairTried = false;
   bool _reencodingForDevice = false;
 
   double _startMs = 0;
   double _endMs = 0;
-  /// Passed to [TrimViewer.maxVideoLength] (min of cap, source duration).
-  Duration _viewerMaxOut = const Duration(seconds: 30);
+  double _totalMs = 0;
+  double _maxSegMs = 30000;
   bool _isPlaying = false;
   bool _loadFailed = false;
-  /// False until duration is known and trim handles are safe to use.
   bool _videoLoaded = false;
   bool _saving = false;
+  Timer? _positionTimer;
 
   @override
   void initState() {
     super.initState();
     _activeVideoFile = widget.videoFile;
-    // Match package example: start [Trimmer.loadVideo] without awaiting in a way
-    // that blocks the first frame, so [TrimViewer] mounts and subscribes to
-    // [TrimmerEvent.initialized] before the async initialize() completes.
     unawaited(_loadVideo());
   }
 
-  /// One re-encode pass (H.264 ~720p) so [Trimmer] / Exo can open the clip.
   Future<void> _failLoadOrReencode() async {
     if (!_h264RepairTried) {
       _h264RepairTried = true;
-      if (mounted) {
-        setState(() => _reencodingForDevice = true);
-      }
+      if (mounted) setState(() => _reencodingForDevice = true);
       final out =
           await minisTranscodeToH264ForDevicePlayback(_activeVideoFile.path);
-      if (mounted) {
-        setState(() => _reencodingForDevice = false);
-      }
+      if (mounted) setState(() => _reencodingForDevice = false);
       if (out != null && mounted) {
         if (_repairTempPath != null && _repairTempPath != out) {
-          try {
-            await File(_repairTempPath!).delete();
-          } catch (_) {}
+          try { await File(_repairTempPath!).delete(); } catch (_) {}
         }
         _repairTempPath = out;
         _activeVideoFile = File(out);
@@ -128,9 +116,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       }
     }
     if (_repairTempPath != null) {
-      try {
-        await File(_repairTempPath!).delete();
-      } catch (_) {}
+      try { await File(_repairTempPath!).delete(); } catch (_) {}
       _repairTempPath = null;
     }
     _activeVideoFile = widget.videoFile;
@@ -144,42 +130,37 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
 
   Future<void> _loadVideo() async {
     try {
-      await _trimmer.loadVideo(videoFile: _activeVideoFile);
-      if (!mounted) {
-        return;
-      }
-      final ctrl = _trimmer.videoPlayerController;
-      if (ctrl == null) {
-        await _failLoadOrReencode();
-        return;
-      }
-      await minisWaitForVideoControllerDuration(ctrl);
-      if (!mounted) return;
-      var total = ctrl.value.duration.inMilliseconds;
-      if (total <= 0) {
-        await _failLoadOrReencode();
-        return;
-      }
-      // Same ~1s placeholder issue as multi-clip duration: reload once after
-      // a beat so [Trimmer]'s player re-reads container length on large MP4s.
+      // Probe native duration first — it is faster and more reliable than
+      // waiting for VideoPlayerController to report duration.
+      int nativeDurationMs = 0;
       try {
-        final len = await _activeVideoFile.length();
-        if (len >= 400 * 1024 && total < 2200) {
-          await Future<void>.delayed(const Duration(milliseconds: 1600));
-          if (!mounted) return;
-          await _trimmer.loadVideo(videoFile: _activeVideoFile);
-          if (!mounted) return;
-          final ctrl2 = _trimmer.videoPlayerController;
-          if (ctrl2 != null) {
-            await minisWaitForVideoControllerDuration(ctrl2);
-            if (!mounted) return;
-            final t2 = ctrl2.value.duration.inMilliseconds;
-            if (t2 > total) {
-              total = t2;
-            }
-          }
-        }
-      } catch (_) {}
+        nativeDurationMs = await RetrytechPlugin.shared.getVideoDurationMs(
+          _activeVideoFile.path,
+        );
+      } catch (e) {
+        debugPrint('minis trimmer native probe: $e');
+      }
+
+      _controller?.dispose();
+      final ctrl = VideoPlayerController.file(_activeVideoFile);
+      _controller = ctrl;
+      await ctrl.initialize();
+      if (!mounted) return;
+      if (ctrl.value.hasError) {
+        await _failLoadOrReencode();
+        return;
+      }
+
+      // Short wait for controller duration (reduced from 6s to 3s since we
+      // already have the native probe as fallback).
+      await minisWaitForVideoControllerDuration(
+        ctrl,
+        timeout: const Duration(seconds: 3),
+      );
+      if (!mounted) return;
+
+      var total = ctrl.value.duration.inMilliseconds;
+      if (total <= 0) total = nativeDurationMs;
       if (total <= 0) {
         await _failLoadOrReencode();
         return;
@@ -187,102 +168,101 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       final capReq = widget.maxOutputDuration?.inMilliseconds ?? total;
       final maxSegMs = math.min(capReq, total);
       setState(() {
-        _viewerMaxOut = Duration(milliseconds: math.max(1, maxSegMs));
+        _totalMs = total.toDouble();
         _startMs = 0;
-        _endMs = math.min(total.toDouble(), maxSegMs.toDouble());
+        _endMs = math.min(total.toDouble(), _maxSegMs);
         _videoLoaded = true;
       });
-    } catch (e, st) {
-      logVideoTrimDiagnostic(
-        e,
-        stackTrace: st,
-        context: 'MinisReelClipTrimmerPage._loadVideo',
-        extra: {
-          'sourceFile': p.basename(_activeVideoFile.path),
-          'phase': 'loadVideo',
-        },
-      );
+    } catch (e) {
+      debugPrint('minis trimmer loadVideo: $e');
       await _failLoadOrReencode();
     }
   }
 
   @override
   void dispose() {
+    _positionTimer?.cancel();
+    _controller?.dispose();
     if (_repairTempPath != null) {
       final path = _repairTempPath!;
       _repairTempPath = null;
       unawaited(File(path).delete().catchError((_) => File(path)));
     }
-    // Do not call [VideoPlayerController.dispose] here: [video_trimmer]'s
-    // [FixedTrimViewer]/[ScrollableTrimViewer] already dispose the shared
-    // [Trimmer.videoPlayerController] on pop; double-dispose causes
-    // "used after being disposed" in Crashlytics.
-    _trimmer.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
-    if (_endMs <= _startMs || _saving) {
-      return;
+  void _startPositionPolling() {
+    _positionTimer?.cancel();
+    _positionTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      final c = _controller;
+      if (c == null || !c.value.isInitialized) return;
+      final pos = c.value.position.inMilliseconds.toDouble();
+      if (pos >= _endMs) {
+        c.seekTo(Duration(milliseconds: _startMs.round()));
+      }
+      if (mounted) setState(() => _isPlaying = c.value.isPlaying);
+    });
+  }
+
+  void _togglePlayPause() {
+    final c = _controller;
+    if (c == null) return;
+    if (c.value.isPlaying) {
+      c.pause();
+      _positionTimer?.cancel();
+      setState(() => _isPlaying = false);
+    } else {
+      final pos = c.value.position.inMilliseconds.toDouble();
+      if (pos < _startMs || pos >= _endMs) {
+        c.seekTo(Duration(milliseconds: _startMs.round()));
+      }
+      c.play();
+      _startPositionPolling();
+      setState(() => _isPlaying = true);
     }
+  }
+
+  String _formatMs(double ms) {
+    final sec = (ms / 1000).round();
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _save() async {
+    if (_endMs <= _startMs || _saving) return;
     setState(() => _saving = true);
-    // Bug 3 fix: _saving is reset in a finally block that wraps the entire
-    // native call so it is guaranteed to clear even when the onSave callback
-    // fires on a background thread after the widget has left the tree.
-    bool _poppedFromOnSave = false;
+    _controller?.pause();
+
     try {
-      await _trimmer.saveTrimmedVideo(
-        startValue: _startMs,
-        endValue: _endMs,
-        storageDir: StorageDir.temporaryDirectory,
-        videoFolderName: 'MinisReelTrim',
-        onSave: (outputPath) {
-          if (!mounted) {
-            return;
-          }
-          if (outputPath != null && outputPath.isNotEmpty) {
-            final spanMs =
-                (_endMs - _startMs).round().clamp(1, 24 * 60 * 60 * 1000);
-            _poppedFromOnSave = true;
-            Navigator.of(context, rootNavigator: true).pop(
-              MinisReelTrimResult(path: outputPath, durationMs: spanMs),
-            );
-            return;
-          }
-          logVideoTrimMissingOutputDiagnostic(
-            context: 'MinisReelClipTrimmerPage.saveTrimmedVideo',
-            extra: {
-              'sourceFile': p.basename(_activeVideoFile.path),
-              'startMs': _startMs,
-              'endMs': _endMs,
-              'spanMs': _endMs - _startMs,
-            },
-          );
-          if (mounted) {
-            showMinisToast(context, messageForVideoTrimMissingOutput());
-          }
-        },
+      final dir = await getTemporaryDirectory();
+      final outPath = p.join(
+        dir.path,
+        'minis_trim_${DateTime.now().microsecondsSinceEpoch}.mp4',
       );
-    } catch (e, st) {
-      logVideoTrimDiagnostic(
-        e,
-        stackTrace: st,
-        context: 'MinisReelClipTrimmerPage._save',
-        extra: {
-          'sourceFile': p.basename(_activeVideoFile.path),
-          'startMs': _startMs,
-          'endMs': _endMs,
-        },
+
+      final result = await RetrytechPlugin.shared.trimVideo(
+        inputPath: _activeVideoFile.path,
+        outputPath: outPath,
+        startMs: _startMs.round(),
+        endMs: _endMs.round(),
       );
-      if (mounted) {
-        showMinisToast(context, messageForVideoTrimFailure(e));
+
+      if (!mounted) return;
+      if (result.isNotEmpty && File(result).existsSync() && File(result).lengthSync() > 0) {
+        final spanMs =
+            (_endMs - _startMs).round().clamp(1, 24 * 60 * 60 * 1000);
+        Navigator.of(context, rootNavigator: true).pop(
+          MinisReelTrimResult(path: result, durationMs: spanMs),
+        );
+        return;
       }
+      showMinisToast(context, 'Trim failed. Please try again.');
+    } catch (e) {
+      debugPrint('minis trim save error: $e');
+      if (mounted) showMinisToast(context, 'Trim failed: $e');
     } finally {
-      // Always clear _saving so the Save button re-enables. Skip if we already
-      // popped via onSave (widget may be disposed by the time finally runs).
-      if (mounted && !_poppedFromOnSave) {
-        setState(() => _saving = false);
-      }
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -356,9 +336,9 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       );
     }
 
-    final width = MediaQuery.sizeOf(context).width;
     final accent = Theme.of(context).colorScheme.primary;
     final capSec = widget.maxOutputDuration?.inSeconds;
+    final ctrl = _controller;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -390,7 +370,15 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    VideoViewer(trimmer: _trimmer),
+                    if (ctrl != null && ctrl.value.isInitialized)
+                      Center(
+                        child: AspectRatio(
+                          aspectRatio: ctrl.value.aspectRatio,
+                          child: VideoPlayer(ctrl),
+                        ),
+                      )
+                    else
+                      const ColoredBox(color: Colors.black),
                     if (!_videoLoaded)
                       const ColoredBox(
                         color: Color(0xCC000000),
@@ -401,7 +389,7 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                               CircularProgressIndicator(color: Colors.white),
                               SizedBox(height: 12),
                               Text(
-                                'Loading…',
+                                'Loading...',
                                 style: TextStyle(color: Colors.white70),
                               ),
                             ],
@@ -411,15 +399,77 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
                   ],
                 ),
               ),
-              // Non-zero max length matches the package example; [Duration.zero]
-              // forces a code path where the scroll vs fixed picker can misbehave on
-              // some devices. Use a typical segment cap so [ViewerType.auto] can
-              // choose [ScrollableTrimViewer] for long clips (better track UX).
-              ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: width,
-                  maxWidth: width,
-                  minHeight: 100,
+              // -- Trim range slider --
+              if (_videoLoaded && _totalMs > 0)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 8),
+                      SliderTheme(
+                        data: SliderThemeData(
+                          activeTrackColor: accent,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: accent,
+                          overlayColor: accent.withAlpha(40),
+                          rangeThumbShape: const RoundRangeSliderThumbShape(
+                            enabledThumbRadius: 10,
+                          ),
+                        ),
+                        child: RangeSlider(
+                          min: 0,
+                          max: _totalMs,
+                          values: RangeValues(_startMs, _endMs),
+                          onChanged: (v) {
+                            setState(() {
+                              var s = v.start;
+                              var e = v.end;
+                              // Enforce maxOutputDuration budget
+                              if (e - s > _maxSegMs) {
+                                // Keep whichever handle the user is NOT dragging
+                                if ((s - _startMs).abs() > (e - _endMs).abs()) {
+                                  s = e - _maxSegMs;
+                                } else {
+                                  e = s + _maxSegMs;
+                                }
+                              }
+                              _startMs = s.clamp(0, _totalMs);
+                              _endMs = e.clamp(0, _totalMs);
+                            });
+                          },
+                          onChangeEnd: (v) {
+                            _controller?.seekTo(
+                              Duration(milliseconds: v.start.round()),
+                            );
+                          },
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              _formatMs(_startMs),
+                              style: const TextStyle(
+                                color: Colors.white70, fontSize: 13),
+                            ),
+                            Text(
+                              'Duration: ${_formatMs(_endMs - _startMs)}',
+                              style: const TextStyle(
+                                color: Colors.white, fontSize: 13,
+                                fontWeight: FontWeight.w600),
+                            ),
+                            Text(
+                              _formatMs(_endMs),
+                              style: const TextStyle(
+                                color: Colors.white70, fontSize: 13),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
                 child: _videoLoaded
                     ? TrimViewer(

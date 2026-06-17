@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 
 /// User-chosen slice of an audio file for reel background / guide playback.
 ///
@@ -31,6 +35,23 @@ class MinisMusicSegment {
       startMs: (map['startMs'] as num?)?.toInt() ?? 0,
       endMs: (map['endMs'] as num?)?.toInt() ?? 0,
     );
+  }
+}
+
+/// Deletes all persisted music files from the `minis_music/` directory.
+///
+/// Call after a successful upload to prevent accumulation of stale copies.
+/// Safe to call even if the directory does not exist or is already empty.
+Future<void> cleanUpMinisMusicFiles() async {
+  try {
+    final dir = await getApplicationDocumentsDirectory();
+    final musicDir = Directory(p.join(dir.path, 'minis_music'));
+    if (await musicDir.exists()) {
+      await musicDir.delete(recursive: true);
+      debugPrint('[minis_music] cleaned up persisted music files');
+    }
+  } catch (e) {
+    debugPrint('[minis_music] cleanup failed (non-fatal): $e');
   }
 }
 
