@@ -1,0 +1,12 @@
+name: video_thumbnail
+description: Mock video_thumbnail to avoid duplicate iOS symbols with get_thumbnail_video
+version: 0.5.6
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=2.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  get_thumbnail_video: ^0.7.3
