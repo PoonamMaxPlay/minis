@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'package:path/path.dart' as p;
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
+import 'package:loopit_minis/src/independent/minis_music_segment.dart';
 import 'package:loopit_minis/src/independent/minis_reel_clip_trimmer_page.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
 import 'package:loopit_minis/src/independent/minis_video_file_ready.dart';
@@ -38,6 +38,7 @@ class MinisVideoPreviewPage extends StatefulWidget {
     this.allowReelTrim = false,
     this.confirmOnClose = false,
     this.initialTotalDurationMs,
+    this.musicSegment,
   });
 
   final List<String> videoPaths;
@@ -54,6 +55,11 @@ class MinisVideoPreviewPage extends StatefulWidget {
   /// Known total duration for multi-clip previews (avoiding redundant probes).
   final int? initialTotalDurationMs;
 
+  /// When non-null the preview mutes the original recorded clip audio so only
+  /// the pure music track is heard (prevents the recorded mic vs. music
+  /// double-audio when the user picked music during capture).
+  final MinisMusicSegment? musicSegment;
+
   /// Pushes this page and returns path + duration when the user confirms.
   /// Waits for the file to exist (handles late flush after merge/export).
   static Future<MinisVideoPreviewResult?> open(
@@ -64,6 +70,7 @@ class MinisVideoPreviewPage extends StatefulWidget {
     bool allowReelTrim = false,
     bool confirmOnClose = false,
     int? initialTotalDurationMs,
+    MinisMusicSegment? musicSegment,
   }) async {
     if (videoPaths.isEmpty) return null;
     debugPrint(
@@ -94,6 +101,7 @@ class MinisVideoPreviewPage extends StatefulWidget {
           allowReelTrim: allowReelTrim,
           confirmOnClose: confirmOnClose,
           initialTotalDurationMs: initialTotalDurationMs,
+          musicSegment: musicSegment,
         ),
       ),
     );
@@ -300,6 +308,9 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
   void _initController() {
     if (_isMultiClip) {
       _nativeController?.dispose();
+      // Do NOT pass mute even when musicSegment != null: the merged preview
+      // file has the pure music baked in (clip audio dropped at merge time).
+      // Muting the native player would silence the music too.
       _nativeController = MinisPreviewPlayerController(_paths);
       _nativeController!.addListener(() {
         if (mounted) setState(() {});
@@ -597,16 +608,6 @@ class _MinisVideoPreviewPageState extends State<MinisVideoPreviewPage> {
       unawaited(File(path).delete().catchError((_) => File(path)));
     }
     super.dispose();
-  }
-
-  static String _formatDuration(Duration d) {
-    final h = d.inHours;
-    final m = d.inMinutes.remainder(60);
-    final s = d.inSeconds.remainder(60);
-    if (h > 0) {
-      return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-    }
-    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   @override

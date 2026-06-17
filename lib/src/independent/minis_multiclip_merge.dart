@@ -13,28 +13,28 @@ import 'package:loopit_minis/src/minis_log.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
 import 'package:loopit_minis/src/session_and_toast.dart';
 
-/// iOS: AVAssetExportSession cannot read files from tmp/ during composition,
-/// and AVPlayer cannot play files from Library/Caches.
+/// iOS: AVAssetExportSession-derived helpers cannot read files from tmp/
+/// during composition, and AVPlayer cannot play files from Library/Caches.
 /// This helper copies any tmp/ clips to Documents and returns safe paths.
 /// On Android this is a no-op — returns original paths unchanged.
 Future<List<String>> _sanitizeClipPathsForIos(List<String> paths) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return paths;
-  final base = await getApplicationDocumentsDirectory();
-  final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+  final basePath = await NativePaths.documentsDir();
+  if (basePath == null) return paths;
+  final dir = Directory(NativePaths.join([basePath, 'loopit_minis_captures']));
   if (!await dir.exists()) await dir.create(recursive: true);
 
   final result = <String>[];
   for (final path in paths) {
     if (path.contains('/tmp/') || path.contains('/Caches/')) {
       try {
-        final ext = p.extension(path);
-        final dest = p.join(
+        final ext = NativePaths.extension(path);
+        final dest = NativePaths.join([
           dir.path,
           'minis_safe_${DateTime.now().microsecondsSinceEpoch}$ext',
-        );
+        ]);
         await File(path).copy(dest);
         result.add(dest);
-        // Best-effort cleanup of source.
         try { await File(path).delete(); } catch (_) {}
       } catch (e, st) {
         MinisLog.w('iOS clip sanitize copy failed', e, st);
@@ -47,19 +47,18 @@ Future<List<String>> _sanitizeClipPathsForIos(List<String> paths) async {
   return result;
 }
 
-/// On iOS, AVAssetExportSession writes to Caches (tmp), but AVPlayer
-/// cannot play files from there (-12660). After export, copy to Documents.
 Future<String> _copyToDocumentsIfIos(String cachePath) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return cachePath;
   try {
-    final base = await getApplicationDocumentsDirectory();
-    final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+    final basePath = await NativePaths.documentsDir();
+    if (basePath == null) return cachePath;
+    final dir = Directory(NativePaths.join([basePath, 'loopit_minis_captures']));
     if (!await dir.exists()) await dir.create(recursive: true);
-    final ext = p.extension(cachePath);
-    final dest = p.join(
+    final ext = NativePaths.extension(cachePath);
+    final dest = NativePaths.join([
       dir.path,
       'minis_reel_${DateTime.now().microsecondsSinceEpoch}$ext',
-    );
+    ]);
     await File(cachePath).copy(dest);
     try { await File(cachePath).delete(); } catch (_) {}
     return dest;
@@ -69,12 +68,14 @@ Future<String> _copyToDocumentsIfIos(String cachePath) async {
   }
 }
 
-/// Same platforms as [proVideoEditorRenderExportSupported] in hub (no web).
+/// Phase 1: support gating now keys off the native engine availability.
+/// Returns false when the native VidEdit engine is not built into this
+/// binary. Callers should fall back to single-clip handoff or show a
+/// "video editing tools rebuilding" message.
 bool minisMulticlipMergeSupported() {
   if (kIsWeb) return false;
-  return defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS ||
-      defaultTargetPlatform == TargetPlatform.macOS;
+  if (!MinisVidEdit.instance.isPlatformEligible) return false;
+  return MinisVidEdit.instance.isAvailableSync;
 }
 
 
@@ -94,12 +95,24 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   MinisMusicSegment? backgroundMusic,
 }) async {
   if (clipPaths.isEmpty) return null;
-  if (!minisMulticlipMergeSupported()) {
+
+  // Native engine availability gates the entire merge path. When unavailable
+  // we still allow the single-clip happy path so capture flows keep working.
+  final engineReady = minisMulticlipMergeSupported();
+
+  if (!engineReady) {
+    if (clipPaths.length == 1 &&
+        playbackSpeed == 1.0 &&
+        enableAudio == true &&
+        (backgroundMusic == null || backgroundMusic.path.trim().isEmpty)) {
+      return clipPaths.first;
+    }
     if (context.mounted) {
       showMinisToast(context, 'Merging clips requires Android or iOS.');
     }
     return null;
   }
+
   for (final path in clipPaths) {
     if (!File(path).existsSync()) {
       if (context.mounted) {
@@ -117,7 +130,9 @@ Future<String?> mergeMinisVideoClipsWithDialog({
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
-  final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
+  final tempDirPath = await NativePaths.cacheDir();
+  if (tempDirPath == null) return null;
+  final outPath = NativePaths.join([tempDirPath, 'minis_reel_$id.mp4']);
   final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
 
   // Background music
@@ -207,11 +222,23 @@ Future<String?> mergeMinisVideoClipsWithDialog({
         );
 
   try {
-    await future;
-    final finalPath = await _copyToDocumentsIfIos(outPath);
+    final result = await future;
+    if (result == null || result.isEmpty) return null;
+    final finalPath = await _copyToDocumentsIfIos(result);
     _logMergedVideoFileProbe(finalPath);
     return finalPath;
-  } on RenderCanceledException {
+  } on VidEditCancelled {
+    return null;
+  } on VidEditUnsupportedError {
+    if (clipPaths.length == 1) {
+      dev.log('minis merge engine unavailable, falling back to single clip',
+          name: 'MinisMerge');
+      return clipPaths.first;
+    }
+    if (context.mounted) {
+      showMinisToast(context,
+          'Video merge unavailable in this build. Pick one clip and continue.');
+    }
     return null;
   } catch (e, st) {
     MinisLog.w('clip merge failed (${clipPaths.length} clips)', e, st);
@@ -221,6 +248,9 @@ Future<String?> mergeMinisVideoClipsWithDialog({
       return clipPaths.first;
     }
     rethrow;
+  } finally {
+    try { await progSub.cancel(); } catch (_) {}
+    try { await progressBus.close(); } catch (_) {}
   }
 }
 
@@ -271,7 +301,21 @@ Future<String?> mergeMinisVideoClipsSilent({
   dynamic qualityPreset,
 }) async {
   if (clipPaths.isEmpty) return null;
-  if (!minisMulticlipMergeSupported()) return null;
+  final engineReady = minisMulticlipMergeSupported();
+  if (!engineReady) {
+    if (clipPaths.length == 1 &&
+        playbackSpeed == 1.0 &&
+        enableAudio == true &&
+        (backgroundMusic == null || backgroundMusic.path.trim().isEmpty)) {
+      return clipPaths.first;
+    }
+    if (MinisCaptureHost.hasHandoffOverlay) {
+      MinisCaptureHost.reportHandoffError(
+        'Video editing tools are rebuilding on a native engine.',
+      );
+    }
+    return null;
+  }
   for (final path in clipPaths) {
     if (!File(path).existsSync()) return null;
   }
@@ -284,7 +328,9 @@ Future<String?> mergeMinisVideoClipsSilent({
   }
 
   final id = DateTime.now().microsecondsSinceEpoch.toString();
-  final outPath = p.join((await getTemporaryDirectory()).path, 'minis_reel_$id.mp4');
+  final tempDirPath = await NativePaths.cacheDir();
+  if (tempDirPath == null) return null;
+  final outPath = NativePaths.join([tempDirPath, 'minis_reel_$id.mp4']);
   final safeClipPaths = await _sanitizeClipPathsForIos(clipPaths);
 
   List<VideoAudioTrack> audioTracks = const [];
@@ -339,13 +385,38 @@ Future<String?> mergeMinisVideoClipsSilent({
   }
 
   try {
-    await ProVideoEditor.instance.renderVideoToFile(outPath, data);
-    await progressSub?.cancel();
-    final finalPath = await _copyToDocumentsIfIos(outPath);
+    final music = backgroundMusic;
+    final keepTempo = playbackSpeed != 1.0 &&
+        music != null &&
+        music.path.trim().isNotEmpty &&
+        File(music.path).existsSync();
+    final result = await MinisVidEdit.instance.concat(
+      inputPaths: safeClipPaths,
+      outputPath: outPath,
+      speed: playbackSpeed,
+      keepAudio: enableAudio,
+      musicPath: music?.path,
+      musicStartMs: music?.startMs ?? 0,
+      musicEndMs: music?.endMs ?? 0,
+      keepMusicTempo: keepTempo,
+      taskId: id,
+    );
+    final finalPath = await _copyToDocumentsIfIos(result);
     _logMergedVideoFileProbe(finalPath);
     return finalPath;
-  } on RenderCanceledException {
-    await progressSub?.cancel();
+  } on VidEditCancelled {
+    return null;
+  } on VidEditUnsupportedError {
+    if (clipPaths.length == 1) {
+      dev.log('minis merge silent engine unavailable, fallback to single clip',
+          name: 'MinisMerge');
+      return clipPaths.first;
+    }
+    if (MinisCaptureHost.hasHandoffOverlay) {
+      MinisCaptureHost.reportHandoffError(
+        'Video merge unavailable in this build.',
+      );
+    }
     return null;
   } catch (e, st) {
     await progressSub?.cancel();
@@ -360,6 +431,8 @@ Future<String?> mergeMinisVideoClipsSilent({
       MinisCaptureHost.reportHandoffError(minisUserFriendlyException(e));
     }
     rethrow;
+  } finally {
+    try { await progSub?.cancel(); } catch (_) {}
   }
 }
 

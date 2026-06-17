@@ -1,0 +1,5 @@
+/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/x86_64/CMakeFiles/minis_camera_pipeline.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/x86_64/CMakeFiles/minis_imgedit.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/x86_64/CMakeFiles/minis_audio_aaudio.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/x86_64/CMakeFiles/edit_cache.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/x86_64/CMakeFiles/rebuild_cache.dir

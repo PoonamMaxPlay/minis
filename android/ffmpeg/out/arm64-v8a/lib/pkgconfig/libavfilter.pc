@@ -1,0 +1,14 @@
+prefix=/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a
+exec_prefix=${prefix}
+libdir=/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib
+includedir=/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/include
+
+Name: libavfilter
+Description: FFmpeg audio/video filtering library
+Version: 9.12.100
+Requires: 
+Requires.private: libswscale >= 7.5.100, libswresample >= 4.12.100, libavutil >= 58.29.100
+Conflicts:
+Libs: -L${libdir}  -lavfilter 
+Libs.private: -pthread -lm -latomic
+Cflags: -I${includedir}

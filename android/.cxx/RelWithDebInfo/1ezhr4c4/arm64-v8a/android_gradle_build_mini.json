@@ -1,0 +1,39 @@
+{
+  "buildFiles": [
+    "/Volumes/KRYPTIX/test/minis/android/src/main/cpp/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Volumes/KRYPTIX/AndroidStudio/SDK/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Volumes/KRYPTIX/AndroidStudio/SDK/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Volumes/KRYPTIX/test/minis/android/.cxx/RelWithDebInfo/1ezhr4c4/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "minis_audio_aaudio::@6890427a1f51a3e7e1df": {
+      "artifactName": "minis_audio_aaudio",
+      "abi": "arm64-v8a",
+      "output": "/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/RelWithDebInfo/1ezhr4c4/obj/arm64-v8a/libminis_audio_aaudio.so",
+      "runtimeFiles": []
+    },
+    "minis_camera_pipeline::@6890427a1f51a3e7e1df": {
+      "artifactName": "minis_camera_pipeline",
+      "abi": "arm64-v8a",
+      "output": "/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/RelWithDebInfo/1ezhr4c4/obj/arm64-v8a/libminis_camera_pipeline.so",
+      "runtimeFiles": []
+    },
+    "minis_imgedit::@6890427a1f51a3e7e1df": {
+      "artifactName": "minis_imgedit",
+      "abi": "arm64-v8a",
+      "output": "/Volumes/KRYPTIX/test/minis/example/build/loopit_minis/intermediates/cxx/RelWithDebInfo/1ezhr4c4/obj/arm64-v8a/libminis_imgedit.so",
+      "runtimeFiles": []
+    }
+  }
+}

@@ -1,0 +1,5 @@
+/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a/CMakeFiles/minis_camera_pipeline.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a/CMakeFiles/minis_imgedit.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a/CMakeFiles/minis_audio_aaudio.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a/CMakeFiles/edit_cache.dir
+/Volumes/KRYPTIX/test/minis/android/.cxx/Debug/6h262v25/armeabi-v7a/CMakeFiles/rebuild_cache.dir

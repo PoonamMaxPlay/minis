@@ -11,8 +11,8 @@ import 'package:retrytech_plugin/retrytech_plugin.dart';
 /// Uses ProVideoEditor (FFmpeg) — reliable and memory-safe unlike
 /// VideoCompress which OOMs on larger files.
 ///
-/// Returns a new path, or `null` on failure. Callers should delete the returned
-/// file when the user cancels, or if playback still fails.
+/// Callers should delete the returned file when the user cancels, or if
+/// playback still fails.
 Future<String?> minisTranscodeToH264ForDevicePlayback(
   String inputPath,
 ) async {

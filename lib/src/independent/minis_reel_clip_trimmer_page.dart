@@ -1,8 +1,7 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' as math;
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:loopit_minis/src/independent/minis_h264_repair_transcode.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
@@ -20,26 +19,25 @@ import 'package:video_player/video_player.dart';
 /// Do not delete the page — this gate is the only thing turning it off.
 bool minisReelClipTrimmerPlatformSupported() => false;
 
-/// Path and duration from [MinisReelClipTrimmerPage] save.
-///
-/// [durationMs] is the trim window (end − start), not file metadata — some
-/// encoders leave container duration stale; UI and reel caps should use this.
+/// Returns true once the native VidEdit engine reports `engineAvailable`.
+/// Capture flows hide the **Trim** action when this is false.
+bool minisReelClipTrimmerPlatformSupported() {
+  if (!MinisVidEdit.instance.isPlatformEligible) return false;
+  return MinisVidEdit.instance.isAvailableSync;
+}
+
+/// Result returned by [MinisReelClipTrimmerPage.open].
 class MinisReelTrimResult {
-  const MinisReelTrimResult({
-    required this.path,
-    required this.durationMs,
-  });
+  const MinisReelTrimResult({required this.path, required this.durationMs});
 
   final String path;
   final int durationMs;
 }
 
-/// Full-screen trimmer for one video file (package:video_trimmer).
-///
-/// [maxOutputDuration] caps how long the trimmed segment may be (e.g. remaining
-/// reel budget when appending a long gallery clip). Defaults to 30s when null.
-///
-/// Returns [MinisReelTrimResult] on save, or `null` on cancel.
+/// Full-screen trimmer. Builds a scrub strip via
+/// [MinisVidEdit.thumbnailStrip], drives playback through a
+/// [VideoPlayerController] (the in-plugin native shim), and hands the final
+/// range to [MinisVidEdit.trim] when the user accepts.
 class MinisReelClipTrimmerPage extends StatefulWidget {
   const MinisReelClipTrimmerPage({
     super.key,
@@ -48,8 +46,6 @@ class MinisReelClipTrimmerPage extends StatefulWidget {
   });
 
   final File videoFile;
-
-  /// Maximum duration of the exported trim. Clamped per-video to source length.
   final Duration? maxOutputDuration;
 
   static Future<MinisReelTrimResult?> open(
@@ -69,8 +65,7 @@ class MinisReelClipTrimmerPage extends StatefulWidget {
   }
 
   @override
-  State<MinisReelClipTrimmerPage> createState() =>
-      _MinisReelClipTrimmerPageState();
+  State<MinisReelClipTrimmerPage> createState() => _MinisReelClipTrimmerPageState();
 }
 
 class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
@@ -165,8 +160,8 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         await _failLoadOrReencode();
         return;
       }
-      final capReq = widget.maxOutputDuration?.inMilliseconds ?? total;
-      final maxSegMs = math.min(capReq, total);
+
+      if (!mounted) { await controller.dispose(); return; }
       setState(() {
         _totalMs = total.toDouble();
         _startMs = 0;
@@ -345,19 +340,22 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
-        title: Text(
-          capSec != null ? 'Trim (max ${capSec}s)' : 'Trim clip',
+        title: const Text('Trim clip'),
+        leading: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: () =>
+              Navigator.of(context, rootNavigator: true).pop<MinisReelTrimResult>(),
         ),
         actions: [
           TextButton(
-            onPressed: (_saving || !_videoLoaded) ? null : _save,
-            child: Text(
-              'Save',
-              style: TextStyle(
-                color: accent,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+            onPressed: _saving ? null : _save,
+            style: TextButton.styleFrom(foregroundColor: Colors.white),
+            child: _saving
+                ? const SizedBox(
+                    width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Text('Save'),
           ),
         ],
       ),
@@ -558,5 +556,71 @@ class _MinisReelClipTrimmerPageState extends State<MinisReelClipTrimmerPage> {
         ],
       ),
     );
+  }
+
+  Widget _buildError() => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+        ),
+      );
+
+  Widget _buildEditor() {
+    final controller = _controller;
+    if (controller == null) {
+      return const Center(child: CircularProgressIndicator(color: Colors.white));
+    }
+    return Column(
+      children: [
+        Expanded(
+          child: Center(
+            child: AspectRatio(
+              aspectRatio: controller.value.aspectRatio,
+              child: VideoPlayer(controller),
+            ),
+          ),
+        ),
+        if (_thumbs.isNotEmpty)
+          SizedBox(
+            height: 56,
+            child: Row(
+              children: [
+                for (final b in _thumbs)
+                  Expanded(child: Image.memory(b, fit: BoxFit.cover)),
+              ],
+            ),
+          ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: RangeSlider(
+            values: _range,
+            min: 0,
+            max: 1,
+            divisions: 1000,
+            activeColor: Colors.white,
+            inactiveColor: Colors.white24,
+            onChanged: (v) async {
+              setState(() => _range = v);
+              await controller.seekTo(Duration(milliseconds: _startMs));
+            },
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            '${_formatMs(_startMs)} → ${_formatMs(_endMs)}'
+            '   (${_formatMs(_endMs - _startMs)})',
+            style: const TextStyle(color: Colors.white70),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatMs(int ms) {
+    final m = (ms ~/ 60000).toString().padLeft(2, '0');
+    final s = ((ms ~/ 1000) % 60).toString().padLeft(2, '0');
+    final cs = ((ms % 1000) ~/ 10).toString().padLeft(2, '0');
+    return '$m:$s.$cs';
   }
 }

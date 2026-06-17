@@ -1,0 +1,14 @@
+prefix=/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a
+exec_prefix=${prefix}
+libdir=/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib
+includedir=/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/include
+
+Name: libavcodec
+Description: FFmpeg codec library
+Version: 60.31.102
+Requires: 
+Requires.private: libswresample >= 4.12.100, libavutil >= 58.29.100
+Conflicts:
+Libs: -L${libdir}  -lavcodec 
+Libs.private: -L/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib -lvpx -lm -pthread -lm -latomic -L/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib -lfdk-aac -lm -L/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib -lopus -L/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib -lx264 -lm -ldl -L/Volumes/KRYPTIX/test/minis/android/ffmpeg/out/arm64-v8a/lib -lx265 -landroid -lz
+Cflags: -I${includedir}

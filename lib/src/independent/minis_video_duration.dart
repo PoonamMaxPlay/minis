@@ -103,8 +103,8 @@ Future<int> minisRefineGalleryPreflightProbeMs(
 /// concurrent probe (typical: 100-400 ms, hard cap 2 s).
 ///
 /// Gallery videos are fully written on disk and never have the "fresh export
-/// ~1 s placeholder" problem that camera clips do. Both ProVideoEditor and
-/// VideoPlayer are started in parallel; the best result wins.
+/// ~1 s placeholder" problem that camera clips do. Both the native engine
+/// probe and VideoPlayer are started in parallel; the best result wins.
 Future<int> _resolveGalleryFileDurationMs(
   String filePath,
   int reportedMs,
@@ -122,18 +122,17 @@ Future<int> _resolveGalleryFileDurationMs(
   final startTime = DateTime.now();
 
   final metaFuture =
-      _probeViaMeta(file).timeout(const Duration(seconds: 3), onTimeout: () => 0);
+      _probeViaEngine(file).timeout(const Duration(seconds: 3), onTimeout: () => 0);
   final playerFuture = _durationMsViaVideoPlayer(file)
       .timeout(const Duration(seconds: 6), onTimeout: () => 0);
-  final compressFuture = _probeViaVideoCompress(filePath)
-      .timeout(const Duration(seconds: 4), onTimeout: () => 0);
 
   int best = 0;
   try {
-    if (kDebugMode) debugPrint('Racing all 3 probers (early exit on first valid)...');
+    if (kDebugMode) debugPrint('Racing probers (early exit on first valid)...');
 
     final completer = Completer<int>();
     int completedCount = 0;
+    const int totalProbers = 2;
 
     void checkDone(int val) {
       if (val > best) best = val;
@@ -141,7 +140,7 @@ Future<int> _resolveGalleryFileDurationMs(
       if (!completer.isCompleted) {
         if (best > 1000 && completedCount >= 1) {
           completer.complete(best);
-        } else if (completedCount == 3) {
+        } else if (completedCount == totalProbers) {
           completer.complete(best);
         }
       }
@@ -149,7 +148,6 @@ Future<int> _resolveGalleryFileDurationMs(
 
     metaFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
     playerFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
-    compressFuture.then((v) => checkDone(v)).catchError((_) => checkDone(0));
 
     best = await completer.future.timeout(
       const Duration(seconds: 5),
@@ -194,29 +192,18 @@ Future<int> _resolveGalleryFileDurationMs(
   return math.max(coalesced, 1);
 }
 
-Future<int> _probeViaMeta(File file) async {
+Future<int> _probeViaEngine(File file) async {
+  if (!MinisVidEdit.instance.isAvailableSync) return 0;
   try {
-    if (kDebugMode) debugPrint('[_probeViaMeta] Starting ProVideoEditor metadata read...');
-    final meta = await ProVideoEditor.instance
-        .getMetadata(EditorVideo.file(file))
+    if (kDebugMode) debugPrint('[_probeViaEngine] Starting native probe...');
+    final meta = await MinisVidEdit.instance
+        .probe(file.path)
         .timeout(const Duration(seconds: 3));
-    if (kDebugMode) debugPrint('[_probeViaMeta] Success! duration=${meta.duration.inMilliseconds}ms');
-    return meta.duration.inMilliseconds.clamp(0, 1 << 30);
+    if (meta == null) return 0;
+    if (kDebugMode) debugPrint('[_probeViaEngine] duration=${meta.durationMs}ms');
+    return meta.durationMs.clamp(0, 1 << 30);
   } catch (e, st) {
-    if (kDebugMode) debugPrint('[_probeViaMeta] Failed: $e\n$st');
-    return 0;
-  }
-}
-
-Future<int> _probeViaVideoCompress(String filePath) async {
-  try {
-    if (kDebugMode) debugPrint('[_probeViaVideoCompress] Starting VideoCompress metadata read...');
-    final info = await VideoCompress.getMediaInfo(filePath).timeout(const Duration(seconds: 4));
-    final durationMs = info.duration?.toInt() ?? 0;
-    if (kDebugMode) debugPrint('[_probeViaVideoCompress] Success! duration=${durationMs}ms');
-    return durationMs;
-  } catch (e, st) {
-    if (kDebugMode) debugPrint('[_probeViaVideoCompress] Failed: $e\n$st');
+    if (kDebugMode) debugPrint('[_probeViaEngine] Failed: $e\n$st');
     return 0;
   }
 }

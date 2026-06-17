@@ -2,20 +2,22 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:audio_waveforms/audio_waveforms.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:audio_session/audio_session.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:video_thumbnail/video_thumbnail.dart';
+import 'package:loopit_minis/src/audio/minis_audio_player.dart';
+import 'package:loopit_minis/src/audio/minis_audio_session.dart';
+import 'package:loopit_minis/src/sys/paths.dart';
+import 'package:loopit_minis/src/sys/permissions.dart';
+import 'package:loopit_minis/src/sys/picker.dart';
+import 'package:loopit_minis/src/sys/wakelock.dart';
 
-import 'package:loopit_minis/src/independent/camera_plugin_minis_engine.dart';
+import 'package:loopit_minis/src/videdit/videdit_engine.dart';
+import 'package:loopit_minis/src/videdit/videdit_types.dart';
+import 'package:loopit_minis/src/independent/deepar_camera_engine.dart';
 import 'package:loopit_minis/src/independent/minis_camera_engine_factory.dart';
+import 'package:loopit_minis/src/independent/minis_deepar_catalog.dart';
+import 'package:loopit_minis/src/independent/minis_native_permissions.dart';
 import 'package:loopit_minis/src/independent/minis_camera_performance.dart';
 import 'package:loopit_minis/src/independent/minis_gallery_preview.dart';
 import 'package:loopit_minis/src/independent/minis_video_duration.dart';
@@ -32,7 +34,112 @@ import 'package:loopit_minis/src/minis_capture_host.dart';
 import 'package:loopit_minis/src/minis_capture_ports.dart';
 import 'package:loopit_minis/src/minis_log.dart';
 import 'package:loopit_minis/src/minis_user_message.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
+
+/// Framing guides drawn over the preview. Engine still records its native
+/// aspect — these letterbox/safe-area overlays guide composition only.
+enum MinisAspectRatio {
+  full, // engine native; no letterbox
+  r9x16,
+  r4x5,
+  r1x1,
+}
+
+extension _MinisAspectRatioMath on MinisAspectRatio {
+  double? get ratio {
+    switch (this) {
+      case MinisAspectRatio.full:
+        return null;
+      case MinisAspectRatio.r9x16:
+        return 9 / 16;
+      case MinisAspectRatio.r4x5:
+        return 4 / 5;
+      case MinisAspectRatio.r1x1:
+        return 1.0;
+    }
+  }
+
+  String get shortLabel {
+    switch (this) {
+      case MinisAspectRatio.full:
+        return 'Full';
+      case MinisAspectRatio.r9x16:
+        return '9:16';
+      case MinisAspectRatio.r4x5:
+        return '4:5';
+      case MinisAspectRatio.r1x1:
+        return '1:1';
+    }
+  }
+}
+
+/// White-balance presets exposed by the rail. `auto` clears manual WB and
+/// lets the engine pick; named presets pass a kelvin value to `setManual`.
+enum MinisWhiteBalancePreset {
+  auto,
+  tungsten,
+  fluorescent,
+  daylight,
+  cloudy,
+}
+
+extension _MinisWhiteBalancePresetMeta on MinisWhiteBalancePreset {
+  String get label {
+    switch (this) {
+      case MinisWhiteBalancePreset.auto:
+        return 'Auto';
+      case MinisWhiteBalancePreset.tungsten:
+        return 'Tungsten';
+      case MinisWhiteBalancePreset.fluorescent:
+        return 'Fluor';
+      case MinisWhiteBalancePreset.daylight:
+        return 'Daylight';
+      case MinisWhiteBalancePreset.cloudy:
+        return 'Cloudy';
+    }
+  }
+
+  int? get kelvin {
+    switch (this) {
+      case MinisWhiteBalancePreset.auto:
+        return null;
+      case MinisWhiteBalancePreset.tungsten:
+        return 3200;
+      case MinisWhiteBalancePreset.fluorescent:
+        return 4000;
+      case MinisWhiteBalancePreset.daylight:
+        return 5500;
+      case MinisWhiteBalancePreset.cloudy:
+        return 6500;
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case MinisWhiteBalancePreset.auto:
+        return Icons.wb_auto;
+      case MinisWhiteBalancePreset.tungsten:
+        return Icons.wb_incandescent;
+      case MinisWhiteBalancePreset.fluorescent:
+        return Icons.wb_iridescent;
+      case MinisWhiteBalancePreset.daylight:
+        return Icons.wb_sunny;
+      case MinisWhiteBalancePreset.cloudy:
+        return Icons.wb_cloudy;
+    }
+  }
+}
+
+/// Process-lifetime UI preference cache for the capture screen. Survives
+/// re-entry into the screen during the same app session. Not persistent
+/// to disk — host apps that want disk persistence should wrap.
+class MinisCaptureSessionPrefs {
+  MinisCaptureSessionPrefs._();
+  static MinisCaptureSessionPrefs instance = MinisCaptureSessionPrefs._();
+
+  MinisAspectRatio aspectRatio = MinisAspectRatio.r9x16;
+  bool gridVisible = false;
+  MinisRecordCountdownMode countdownMode = MinisRecordCountdownMode.off;
+}
 
 /// Countdown before a **photo** is taken (self-timer). Video uses press-and-hold.
 enum MinisRecordCountdownMode {
@@ -47,7 +154,7 @@ enum MinisRecordCountdownMode {
 }
 
 /// Full-screen Minis-style capture using only [MinisCameraEnginePort] (default:
-/// [CameraPluginMinisEngine], no Retrytech).
+/// [NativeAndroidMinisCameraEngine], no Retrytech).
 ///
 /// **Hold** the shutter to start recording video — once recording is armed
 /// you can release; recording continues until you **tap** the shutter (now
@@ -81,7 +188,7 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
     this.useNativeAndroidCamera = false,
   });
 
-  /// If null, a [CameraPluginMinisEngine] is created and disposed by this
+  /// If null, a [NativeAndroidMinisCameraEngine] is created and disposed by this
   /// widget. If you pass a custom engine, you must dispose it yourself when
   /// not using the default lifecycle (this widget only disposes engines it creates).
   final MinisCameraEnginePort? engine;
@@ -113,7 +220,7 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
   /// allowed. Story and feed flows pass `false` so photo + video both work.
   final bool videoOnly;
 
-  /// Selects preview/capture resolution for the default [CameraPluginMinisEngine].
+  /// Selects preview/capture resolution for the default native engine.
   /// Ignored when [engine] is provided. Defaults to device heuristics ([auto]).
   final MinisCameraPerformanceMode cameraPerformanceMode;
 
@@ -127,16 +234,16 @@ class MinisIndependentCaptureScreen extends StatefulWidget {
       _MinisIndependentCaptureScreenState();
 }
 
-bool _pickedXFileIsVideo(XFile x) {
-  final mt = x.mimeType?.toLowerCase();
-  if (mt != null) {
+bool _pickedPathIsVideo(String path, {String? mime}) {
+  final mt = mime?.toLowerCase();
+  if (mt != null && mt.isNotEmpty) {
     if (mt.startsWith('video/')) return true;
     if (mt.startsWith('image/')) return false;
   }
-  final path = x.path.toLowerCase();
+  final p = path.toLowerCase();
   const v = ['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.3gp', '.avi', '.flv', '.wmv'];
   for (final ext in v) {
-    if (path.endsWith(ext)) return true;
+    if (p.endsWith(ext)) return true;
   }
   return false;
 }
@@ -155,12 +262,12 @@ String _normalizeLocalPickerPath(String raw) {
 }
 
 class _MinisIndependentCaptureScreenState
-    extends State<MinisIndependentCaptureScreen> with TickerProviderStateMixin {
+    extends State<MinisIndependentCaptureScreen>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   static const double _kRailIconSize = 25;
   static const double _kCornerBtnSize = 48;
   static const double _kCornerIconSize = 22;
   static const double _kAppBarIconSize = 26;
-  static const double _kStatusPillIconSize = 17;
   static const double _kRailChevronSize = 26;
 
   /// Fixed column so rail icons and labels stay visually aligned.
@@ -198,6 +305,13 @@ class _MinisIndependentCaptureScreenState
   MinisCameraEnginePort? _engine;
   bool _ownEngine = false;
   bool _webUnsupported = false;
+
+  /// Active DeepAR filter — null means CameraX engine is running normally.
+  DeepArFilter? _activeFilter;
+  /// True while a DeepAR engine is mounted in [_engine] in place of CameraX.
+  bool _filterMode = false;
+  /// Re-entrancy guard for filter swap (dispose → init crossing).
+  bool _filterSwapping = false;
   bool _permissionDenied = false;
   // Which permission(s) the denial screen should name, and whether the OS
   // will even re-prompt ("Don't allow" → only Settings can fix it).
@@ -213,13 +327,21 @@ class _MinisIndependentCaptureScreenState
   bool _lastCaptureIsVideo = false;
   bool _micEnabled = true;
   bool _railExpanded = true;
-  MinisRecordCountdownMode _countdownMode = MinisRecordCountdownMode.off;
+  late MinisRecordCountdownMode _countdownMode;
   bool _countingDown = false;
   int? _countdownTick;
   Timer? _maxRecordTimer;
   Timer? _holdStartTimer;
   bool _shutterFingerDown = false;
   bool _holdVideoArmed = false;
+  bool _recordingLocked = false;
+  bool _lockReadyToEngage = false;
+  bool _pendingStopTap = false;
+  double _shutterPointerStartDx = 0;
+  double _lockDragProgress = 0;
+  static const double _kLockTriggerDistance = 72;
+  late final AnimationController _lockPulseController;
+  late final AnimationController _recordPulseController;
   MinisMusicSegment? _musicSegment;
   PlayerController? _musicGuidePlayer;
   StreamSubscription<int>? _musicGuidePosSub;
@@ -239,7 +361,6 @@ class _MinisIndependentCaptureScreenState
   double _zoomMin = 1.0;
   double _zoomMax = 1.0;
   double _zoomLevel = 1.0;
-  int? _zoomGesturePointer;
   double _zoomPanStartY = 0;
   double _zoomPanStartLevel = 1.0;
 
@@ -251,9 +372,99 @@ class _MinisIndependentCaptureScreenState
   /// When [minisMulticlipMergeSupported] is false, show a one-time banner.
   bool _mergeLimitedBannerDismissed = false;
 
+  /// Rule-of-thirds composition grid overlay. Off by default; toggled via the
+  /// right-rail Grid action and persisted only for this session.
+  late bool _gridVisible;
+
+  /// Low-budget haptic markers fired during recording. Each Duration in this
+  /// set is consumed once per recording session so the same milestone never
+  /// double-pings (the elapsed ticker runs at 50ms cadence).
+  final Set<int> _lowBudgetHapticsFired = <int>{};
+
+  /// Accumulated pinch scale during the current zoom gesture. 1.0 = unchanged.
+  double _pinchAccumulatedScale = 1.0;
+  double _pinchStartZoomLevel = 1.0;
+  bool _zoomScaleActive = false;
+
+  /// Visible tap-to-focus reticle. Null = hidden. Position is in local preview
+  /// coordinates; the painter centers itself on this point.
+  Offset? _focusReticleAt;
+
+  /// True while AE/AF lock is engaged (long-press on preview). Pure UI hint;
+  /// cleared on next tap. Engine doesn't expose a lock API yet.
+  bool _aeAfLocked = false;
+  late final AnimationController _focusReticleController;
+  Timer? _focusReticleHideTimer;
+
+  /// Selected framing aspect ratio. UI-only overlay (engine still records its
+  /// native aspect); presentation/letterbox is applied here.
+  late MinisAspectRatio _aspectRatio;
+
+  /// Whether the shutter coachmark has been shown this session. Soft-persisted
+  /// for the lifetime of the screen — first-launch UX hint only.
+  bool _shutterCoachmarkDismissed = false;
+  Timer? _shutterCoachmarkTimer;
+
+  /// Engine capability snapshot loaded once during boot. Default = empty caps,
+  /// which keeps all extended-feature rails hidden until probed.
+  MinisCameraCapabilities _caps = const MinisCameraCapabilities();
+
+  /// HDR10 capture toggle — rail visible only when caps.hdr10.
+  bool _hdrEnabled = false;
+
+  /// Slow-mo FPS selection. -1 = off / standard. Cycles through caps.slowMoFps.
+  /// Rail visible only when caps.slowMoFps is non-empty.
+  int _slowMoFpsIdx = -1;
+
+  /// White-balance preset. Rail visible only when caps.manualWb is true.
+  MinisWhiteBalancePreset _wb = MinisWhiteBalancePreset.auto;
+
+  /// Live audio levels meter (peak/rms) while recording with mic on.
+  MinisAudioLevels? _liveAudioLevels;
+  StreamSubscription<MinisAudioLevels>? _audioLevelsSub;
+  StreamSubscription<MinisEngineEvent>? _stateSub;
+
+  /// Set when a recoverable in-progress recording was detected on boot.
+  /// We surface a one-shot dialog rather than auto-recovering.
+  bool _recoveryPromptShown = false;
+
+  /// Exposure bias in EV. Engines without exposure control silently ignore.
+  /// Visible after tap-to-focus alongside the reticle.
+  double _exposureBias = 0;
+  static const double _kExposureMin = -2.0;
+  static const double _kExposureMax = 2.0;
+  Timer? _exposureSliderHideTimer;
+  bool _exposureSliderVisible = false;
+
   @override
   void initState() {
     super.initState();
+    // Hydrate UI prefs from the session-scoped store so re-entering camera
+    // keeps last-used framing/grid/countdown — no disk I/O.
+    final prefs = MinisCaptureSessionPrefs.instance;
+    _aspectRatio = prefs.aspectRatio;
+    _gridVisible = prefs.gridVisible;
+    _countdownMode = prefs.countdownMode;
+    // Observe app lifecycle so locking the device / sending the app to the
+    // background stops an in-progress recording. Without this the camera
+    // preview pauses but the underlying recorder keeps capturing audio.
+    WidgetsBinding.instance.addObserver(this);
+    // Keep the screen awake on the capture surface so the display timeout
+    // doesn't lock the device mid-recording, which would pause the camera
+    // and abort the clip. Disabled in dispose.
+    unawaited(NativeWakelock.enable());
+    _lockPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat();
+    _recordPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _focusReticleController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
     // Lock orientation to portrait when entering capture screen
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
@@ -273,6 +484,11 @@ class _MinisIndependentCaptureScreenState
     }
     unawaited(_boot());
     unawaited(_manageAudioSession(true));
+    // Warm the VidEdit capability cache so the multi-clip banner reflects
+    // actual engine state instead of the cold-cache "unavailable" default.
+    unawaited(MinisVidEdit.instance.isAvailable().then((_) {
+      if (mounted) setState(() {});
+    }).catchError((_) {}));
   }
 
   Future<void> _manageAudioSession(bool active) async {
@@ -348,6 +564,11 @@ class _MinisIndependentCaptureScreenState
           _busyMessage = '';
         });
         unawaited(_syncZoomRangeFromEngine());
+        unawaited(_probeEngineCapabilities());
+        _subscribeAudioLevels();
+        _subscribeEngineStateStream();
+        unawaited(_maybePromptRecovery());
+        _armShutterCoachmarkAutoDismiss();
       }
       await _applyInitialMusicPrefillIfAny();
     } catch (e, st) {
@@ -520,6 +741,7 @@ class _MinisIndependentCaptureScreenState
         endMs: endMs,
       );
     });
+    await _autoMuteMicForMusic();
     await _prepareGuideMusic();
   }
 
@@ -530,6 +752,8 @@ class _MinisIndependentCaptureScreenState
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(NativeWakelock.disable());
     // Restore to all orientations when leaving capture.
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
 
@@ -537,6 +761,16 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _clipElapsedTicker?.cancel();
     _zoomBadgeTimer?.cancel();
+    _exposureSliderHideTimer?.cancel();
+    unawaited(_audioLevelsSub?.cancel());
+    _audioLevelsSub = null;
+    unawaited(_stateSub?.cancel());
+    _stateSub = null;
+    _shutterCoachmarkTimer?.cancel();
+    _lockPulseController.dispose();
+    _recordPulseController.dispose();
+    _focusReticleController.dispose();
+    _focusReticleHideTimer?.cancel();
     unawaited(_manageAudioSession(false));
     unawaited(_disposeGuideMusic().catchError((_) {}));
     if (_ownEngine) {
@@ -550,6 +784,21 @@ class _MinisIndependentCaptureScreenState
       }
     }
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Device lock / app backgrounded → finalize any active recording so the
+    // recorder (audio + video) is fully released. Without this the camera
+    // preview pauses on lock but the audio source keeps capturing.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      if (_recording) {
+        unawaited(_stopRecordingInternal());
+      }
+    }
   }
 
   void _toast(String msg) {
@@ -846,76 +1095,67 @@ class _MinisIndependentCaptureScreenState
       !_countingDown &&
       !_busy;
 
+  bool get _hasUnsavedCapture =>
+      _videoClips.isNotEmpty ||
+      (_lastCapturePath != null && _lastCapturePath!.isNotEmpty);
+
+  /// PopScope callback when system-back is pressed and we blocked the pop.
+  /// Confirms via dialog; pops on confirm.
+  Future<void> _handleExitAttempt() async {
+    if (!mounted) return;
+    if (_recording) {
+      _toast('Stop recording before leaving.');
+      return;
+    }
+    if (_countingDown) {
+      _cancelCountdown();
+      return;
+    }
+    final discard = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text(
+          'Discard clip?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'Leaving now will discard the clip you recorded.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Keep recording'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (discard == true && mounted) {
+      final nav = Navigator.maybeOf(context);
+      if (nav != null && nav.canPop()) nav.pop();
+    }
+  }
+
   String? get _emptyConfirmHint {
     if (_recording || _busy || _countingDown) return null;
     if (_canConfirmClip) return null;
     return 'Record or add a clip to finish';
   }
 
-  /// Resolves [PlatformFile] to a path the trim sheet and encoder can open.
-  ///
-  /// Uses the picker path when the file exists; otherwise copies from
-  /// [PlatformFile.readStream] (when [FilePicker.pickFiles] used
-  /// `withReadStream: true`) or from [PlatformFile.bytes].
-  Future<String?> _materializePickedAudioForTrim(PlatformFile file) async {
-    final path = file.path;
-    if (path != null && path.isNotEmpty) {
-      try {
-        if (await File(path).exists()) {
-          return path.replaceAll('\\', '/');
-        }
-      } catch (_) {}
-    }
-    final stream = file.readStream;
-    if (stream != null) {
-      try {
-        final dir = await getTemporaryDirectory();
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? file.extension!
-            : 'm4a';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_pick_${DateTime.now().microsecondsSinceEpoch}.$ext',
-          ),
-        );
-        final sink = dest.openWrite();
-        try {
-          await for (final chunk in stream) {
-            sink.add(chunk);
-          }
-        } finally {
-          await sink.close();
-        }
-        if (!await dest.exists() || await dest.length() == 0) {
-          return null;
-        }
-        return dest.absolute.path.replaceAll('\\', '/');
-      } catch (e) {
-        debugPrint('minis: audio stream copy failed: $e');
-        return null;
-      }
-    }
-    final bytes = file.bytes;
-    if (bytes != null && bytes.isNotEmpty) {
-      try {
-        final dir = await getTemporaryDirectory();
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? file.extension!
-            : 'm4a';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_pick_${DateTime.now().microsecondsSinceEpoch}.$ext',
-          ),
-        );
-        await dest.writeAsBytes(bytes, flush: true);
-        return dest.absolute.path.replaceAll('\\', '/');
-      } catch (e) {
-        debugPrint('minis: audio bytes write failed: $e');
-        return null;
-      }
-    }
+  Future<String?> _normalizePickedFilePath(String? path) async {
+    if (path == null || path.isEmpty) return null;
+    try {
+      final n = path.replaceAll('\\', '/');
+      if (await File(n).exists()) return n;
+    } catch (_) {}
     return null;
   }
 
@@ -948,6 +1188,7 @@ class _MinisIndependentCaptureScreenState
     );
     segment = await _persistMusicSegment(segment);
     setState(() => _musicSegment = segment);
+    await _autoMuteMicForMusic();
     await _prepareGuideMusic();
     _toast('Music ready - long-press Sounds to clear');
     return true;
@@ -958,11 +1199,13 @@ class _MinisIndependentCaptureScreenState
   Future<MinisMusicSegment> _persistMusicSegment(MinisMusicSegment seg) async {
     final src = File(seg.path);
     if (!await src.exists()) return seg;
-    final dir = await getApplicationDocumentsDirectory();
-    final musicDir = Directory(p.join(dir.path, 'minis_music'));
+    final dirPath = await NativePaths.documentsDir();
+    if (dirPath == null) return seg;
+    final musicDir = Directory(NativePaths.join([dirPath, 'minis_music']));
     if (!await musicDir.exists()) await musicDir.create(recursive: true);
-    final ext = p.extension(seg.path).isNotEmpty ? p.extension(seg.path) : '.m4a';
-    final dest = p.join(musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext');
+    final extRaw = NativePaths.extension(seg.path);
+    final ext = extRaw.isNotEmpty ? extRaw : '.m4a';
+    final dest = NativePaths.join([musicDir.path, 'music_${DateTime.now().microsecondsSinceEpoch}$ext']);
     await src.copy(dest);
     
     // Proactively clean up the old file
@@ -998,31 +1241,26 @@ class _MinisIndependentCaptureScreenState
         if (segment == null) return;
         segment = await _persistMusicSegment(segment);
         setState(() => _musicSegment = segment);
+        await _autoMuteMicForMusic();
         await _prepareGuideMusic();
         _toast('Music section updated - long-press Sounds to clear');
         return;
       }
 
-      final r = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: kMinisAudioFileExtensions,
-        dialogTitle: 'Choose audio',
-        withReadStream: true,
+      final r = await NativePicker.pickFile(
+        multi: false,
+        extensions: kMinisAudioFileExtensions,
       );
-      final file = r?.files.single;
       if (!mounted) return;
-      if (file == null) return;
-      final path = await _materializePickedAudioForTrim(file);
+      if (r.isEmpty) return;
+      final file = r.first;
+      final path = await _normalizePickedFilePath(file.path);
       if (!mounted) return;
       if (path == null || path.isEmpty) {
         _toast('Could not read that audio file. Try another one.');
         return;
       }
-      final extFromPicker = file.extension?.toLowerCase();
-      final extFromPath = p.extension(path).toLowerCase().replaceFirst('.', '');
-      final ext = (extFromPicker != null && extFromPicker.isNotEmpty)
-          ? extFromPicker
-          : extFromPath;
+      final ext = NativePaths.extension(path).toLowerCase().replaceFirst('.', '');
       if (!kMinisAudioFileExtensions.contains(ext)) {
         _toast('Please choose an audio file.');
         return;
@@ -1037,6 +1275,7 @@ class _MinisIndependentCaptureScreenState
       if (segment == null) return;
       segment = await _persistMusicSegment(segment);
       setState(() => _musicSegment = segment);
+      await _autoMuteMicForMusic();
       await _prepareGuideMusic();
       _toast('Music ready - long-press Sounds to clear');
     } catch (e) {
@@ -1066,6 +1305,35 @@ class _MinisIndependentCaptureScreenState
     );
   }
 
+  Future<void> _pickSpeed() async {
+    if (_recording || _countingDown || _busy) return;
+    if (_videoClips.isNotEmpty) {
+      _toast(
+        'Speed cannot be changed after recording. '
+        'Remove the clip to pick a different speed.',
+      );
+      return;
+    }
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _SpeedSheet(
+        steps: _speedSteps,
+        activeIndex: _speedIndex,
+      ),
+    );
+    if (picked == null || !mounted) return;
+    if (picked == _speedIndex) return;
+    setState(() => _speedIndex = picked);
+    HapticFeedback.selectionClick();
+    _toast(
+      'Record cap ${_effectiveMaxRecording.inSeconds}s at $_speedRailLabel.',
+    );
+  }
+
   void _cycleCountdownMode() {
     if (_recording || _countingDown || _busy) return;
     setState(() {
@@ -1075,6 +1343,7 @@ class _MinisIndependentCaptureScreenState
         MinisRecordCountdownMode.ten => MinisRecordCountdownMode.off,
       };
     });
+    MinisCaptureSessionPrefs.instance.countdownMode = _countdownMode;
   }
 
   /// Copy a gallery-picked video into app documents so the path stays valid
@@ -1088,16 +1357,17 @@ class _MinisIndependentCaptureScreenState
         'tail=${sourcePath.length > 80 ? sourcePath.substring(sourcePath.length - 80) : sourcePath}',
       );
       if (!exists) return null;
-      final base = await getApplicationDocumentsDirectory();
-      final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
+      final basePath = await NativePaths.documentsDir();
+      if (basePath == null) return null;
+      final dir = Directory(NativePaths.join([basePath, 'loopit_minis_captures']));
       if (!await dir.exists()) await dir.create(recursive: true);
-      final ext = p.extension(sourcePath).toLowerCase();
+      final ext = NativePaths.extension(sourcePath).toLowerCase();
       final safe = (ext.isNotEmpty && ext.length <= 8) ? ext : '.mp4';
       final dest = File(
-        p.join(
+        NativePaths.join([
           dir.path,
           'minis_gallery_in_${DateTime.now().microsecondsSinceEpoch}$safe',
-        ),
+        ]),
       );
       
       // Try an atomic rename (move) first. It's instant. The picker gives us a
@@ -1119,7 +1389,7 @@ class _MinisIndependentCaptureScreenState
       }
       
       final out = dest.path.replaceAll('\\', '/');
-      _logGallery('materialize OK out=${p.basename(out)}');
+      _logGallery('materialize OK out=${NativePaths.basename(out)}');
       return out;
     } catch (e, st) {
       MinisLog.w('gallery video materialize failed', e, st);
@@ -1128,131 +1398,19 @@ class _MinisIndependentCaptureScreenState
     }
   }
 
-  /// When [FilePicker] returns no filesystem path (or path is invalid), copy bytes/stream.
-  Future<String?> _materializePlatformFileAsGallerySource(PlatformFile file) async {
-    _logGallery(
-      'platformFile name=${file.name} size=${file.size} pathNull=${file.path == null} ext=${file.extension}',
-    );
-    final path = file.path;
-    if (path != null && path.isNotEmpty) {
-      try {
-        final n = _normalizeLocalPickerPath(path);
-        final ok = await File(n).exists();
-        _logGallery('platformFile path normalizedExists=$ok');
-        if (ok) return n;
-      } catch (e) {
-        _logGallery('platformFile path error: $e');
-      }
-    }
-    final stream = file.readStream;
-    if (stream != null) {
-      try {
-        final base = await getApplicationDocumentsDirectory();
-        final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
-        if (!await dir.exists()) await dir.create(recursive: true);
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? '.${file.extension!}'
-            : '.mp4';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_gallery_pick_${DateTime.now().microsecondsSinceEpoch}$ext',
-          ),
-        );
-        final sink = dest.openWrite();
-        try {
-          await for (final chunk in stream) {
-            sink.add(chunk);
-          }
-        } finally {
-          await sink.close();
-        }
-        if (!await dest.exists() || await dest.length() == 0) {
-          _logGallery('stream copy empty or missing');
-          return null;
-        }
-        _logGallery('stream copy OK ${p.basename(dest.path)}');
-        return dest.path;
-      } catch (e) {
-        _logGallery('stream copy failed: $e');
-        return null;
-      }
-    }
-    final bytes = file.bytes;
-    if (bytes != null && bytes.isNotEmpty) {
-      try {
-        final base = await getApplicationDocumentsDirectory();
-        final dir = Directory(p.join(base.path, 'loopit_minis_captures'));
-        if (!await dir.exists()) await dir.create(recursive: true);
-        final ext = (file.extension != null && file.extension!.isNotEmpty)
-            ? '.${file.extension!}'
-            : '.mp4';
-        final dest = File(
-          p.join(
-            dir.path,
-            'minis_gallery_pick_${DateTime.now().microsecondsSinceEpoch}$ext',
-          ),
-        );
-        await dest.writeAsBytes(bytes, flush: true);
-        _logGallery('bytes copy OK ${p.basename(dest.path)}');
-        return dest.path;
-      } catch (e) {
-        _logGallery('bytes write failed: $e');
-        return null;
-      }
-    }
-    _logGallery('platformFile no path/stream/bytes');
-    return null;
-  }
-
-  /// Resolves a [PlatformFile] from [FilePicker] to a local path [File] can open.
-  Future<String?> _resolveLocalPathFromPlatformFile(PlatformFile f) async {
-    final rawPath = f.path;
-    String? src;
-    if (rawPath != null && rawPath.isNotEmpty) {
-      src = _normalizeLocalPickerPath(rawPath);
-      _logGallery('resolvePlatformFile raw pathLen=${rawPath.length}');
-      try {
-        final ex = await File(src).exists();
-        _logGallery('resolvePlatformFile normalized exists=$ex');
-        if (!ex) src = null;
-      } catch (e) {
-        _logGallery('resolvePlatformFile File.exists error: $e');
-        src = null;
-      }
-    } else {
-      _logGallery('resolvePlatformFile no path — stream/bytes');
-    }
-    src ??= await _materializePlatformFileAsGallerySource(f);
-    if (src == null || src.isEmpty) return null;
-    _logGallery(
-      'resolvePlatformFile tail=${src.length > 80 ? src.substring(src.length - 80) : src}',
-    );
-    return src;
-  }
-
-  /// Story / feed-style Minis (**!videoOnly**): [pickMedia] hangs or returns null on
-  /// many Android devices; [FileType.media] matches photos + videos in one picker.
-  ///
-  /// Returns `true` if the flow finished here (success, cancel, or handled error).
-  /// Returns `false` to fall back to [ImagePicker] (rare plugin failure).
+  /// Story / feed-style Minis (**!videoOnly**): mixed photos+videos in one picker.
+  /// Returns `true` if the flow finished here.
   Future<bool> _openGalleryMixedMediaViaFilePicker() async {
-    _logGallery('FilePicker(FileType.media) story/mixed');
+    _logGallery('NativePicker.pickMedia story/mixed');
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.media,
-        allowMultiple: false,
-        withReadStream: defaultTargetPlatform == TargetPlatform.android,
-      );
-      _logGallery(
-        'FilePicker media back null=${result == null} count=${result?.files.length ?? 0}',
-      );
-      if (result == null || result.files.isEmpty) {
-        _logGallery('FilePicker media cancel or empty');
+      final items = await NativePicker.pickMedia(multi: false, types: const ['image', 'video']);
+      _logGallery('NativePicker media count=${items.length}');
+      if (items.isEmpty) {
+        _logGallery('NativePicker media cancel or empty');
         return true;
       }
-      final f = result.files.single;
-      final path = await _resolveLocalPathFromPlatformFile(f);
+      final f = items.first;
+      final path = await _normalizePickedFilePath(f.path);
       if (path == null || path.isEmpty) {
         _logGallery('mixed pick could not resolve path');
         _toast('Could not read the selected file.');
@@ -1260,10 +1418,10 @@ class _MinisIndependentCaptureScreenState
       }
       if (!mounted) return true;
 
-      final isVideo = _pickedXFileIsVideo(XFile(path, name: f.name));
-      _logGallery('mixed pick isVideo=$isVideo file=${p.basename(path)}');
+      final isVideo = _pickedPathIsVideo(path, mime: f.mime);
+      _logGallery('mixed pick isVideo=$isVideo file=${NativePaths.basename(path)}');
       _logMulticlip(
-        'picked path=${p.basename(path)} isVideo=$isVideo mime=(filePicker)',
+        'picked path=${NativePaths.basename(path)} isVideo=$isVideo mime=${f.mime}',
       );
 
       if (!isVideo) {
@@ -1280,40 +1438,29 @@ class _MinisIndependentCaptureScreenState
       await _importPickedGalleryVideoFromSourcePath(path);
       return true;
     } catch (e, st) {
-      _logGallery('FilePicker media error: $e\n$st');
+      _logGallery('NativePicker media error: $e\n$st');
       return false;
     }
   }
 
-  /// Minis / reels (**videoOnly**): use native file/video document picker. On many
-  /// Android devices [ImagePicker.pickVideo] returns `null` even after the user
-  /// picks a clip (Photo Picker / OEM quirks); [FilePicker] is reliable here.
+  /// Reels (**videoOnly**): native video picker.
   Future<void> _openGalleryVideoViaFilePicker() async {
-    _logGallery('FilePicker(FileType.video) starting');
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.video,
-      allowMultiple: false,
-      // Android often omits [PlatformFile.path] for SAF URIs — stream still works.
-      withReadStream: defaultTargetPlatform == TargetPlatform.android,
-    );
-    _logGallery(
-      'FilePicker back null=${result == null} count=${result?.files.length ?? 0}',
-    );
-    if (result == null || result.files.isEmpty) {
-      _logGallery('FilePicker cancel or empty');
+    _logGallery('NativePicker.pickVideo starting');
+    final picked = await NativePicker.pickVideo();
+    _logGallery('NativePicker.pickVideo back null=${picked == null}');
+    if (picked == null) {
+      _logGallery('NativePicker.pickVideo cancel');
       return;
     }
-    final f = result.files.single;
-    final src = await _resolveLocalPathFromPlatformFile(f);
+    final src = await _normalizePickedFilePath(picked.path);
     if (src == null || src.isEmpty) {
-      _logGallery('no source after FilePicker');
+      _logGallery('no source after NativePicker.pickVideo');
       _toast('Could not read the selected file.');
       return;
     }
-    
-    // STRICT VERIFICATION: Reject if not identified as video
-    if (!_pickedXFileIsVideo(XFile(src, name: f.name))) {
-      _logGallery('FilePicker returned non-video, REJECTING');
+
+    if (!_pickedPathIsVideo(src, mime: picked.mime)) {
+      _logGallery('NativePicker returned non-video, REJECTING');
       await _showVideoOnlyImageDialog();
       return;
     }
@@ -1322,7 +1469,7 @@ class _MinisIndependentCaptureScreenState
   }
 
   Future<void> _importPickedGalleryVideoFromSourcePath(String sourcePath) async {
-    if (!_pickedXFileIsVideo(XFile(sourcePath))) {
+    if (!_pickedPathIsVideo(sourcePath)) {
       _logGallery('importPickedGalleryVideo: REJECTED non-video path');
       await _showVideoOnlyImageDialog();
       return;
@@ -1356,16 +1503,16 @@ class _MinisIndependentCaptureScreenState
       _toast('Could not read the selected video file.');
       return;
     }
-    _logMulticlip('materialized to=${p.basename(materialized)}');
+    _logMulticlip('materialized to=${NativePaths.basename(materialized)}');
     _logGallery(
-      'materialized ${p.basename(materialized)} len=${materialized.length}',
+      'materialized ${NativePaths.basename(materialized)} len=${materialized.length}',
     );
 
     if (!minisMulticlipMergeSupported()) {
       _logGallery('single-clip → openMinisVideoPreview');
       final preview = await openMinisVideoPreview(context, materialized);
       _logGallery(
-        'preview back null=${preview == null} path=${preview?.path != null ? p.basename(preview!.path) : 'n/a'}',
+        'preview back null=${preview == null} path=${preview?.path != null ? NativePaths.basename(preview!.path) : 'n/a'}',
       );
       if (!mounted) {
         _logGallery('preview ABORT not mounted');
@@ -1520,7 +1667,7 @@ class _MinisIndependentCaptureScreenState
     }
     if (preview != null && preview.path.isNotEmpty) {
       _logMulticlip(
-        'preview confirmed path=${p.basename(preview.path)} '
+        'preview confirmed path=${NativePaths.basename(preview.path)} '
         'durationMs=${preview.durationMs} '
         '(may differ if user trimmed in preview)',
       );
@@ -1573,18 +1720,23 @@ class _MinisIndependentCaptureScreenState
     times.add(400);
     times.add(0);
 
+    // Phase 1: thumbnails come from the native VidEdit engine; returns null
+    // when the engine is not built into this binary so the caller falls back
+    // to a placeholder tile.
+    if (!MinisVidEdit.instance.isAvailableSync) return null;
     for (final tMs in times) {
       try {
-        final b = await VideoThumbnail.thumbnailData(
-          video: filePath,
-          imageFormat: ImageFormat.JPEG,
-          maxWidth: 480,
-          quality: 88,
-          timeMs: tMs,
+        final b = await MinisVidEdit.instance.thumbnailAt(
+          path: filePath,
+          atMs: tMs,
+          width: 480,
+          height: 480,
         );
         if (b != null && b.isNotEmpty) {
           return b;
         }
+      } on VidEditUnsupportedError {
+        return null;
       } catch (_) {}
     }
     return null;
@@ -1604,7 +1756,7 @@ class _MinisIndependentCaptureScreenState
     bool durationAlreadyFinalized = false,
   }) async {
     _logMulticlip(
-      '_appendVideoSegment enter path=${p.basename(filePath)} durationMs=$durationMs '
+      '_appendVideoSegment enter path=${NativePaths.basename(filePath)} durationMs=$durationMs '
       'trustPreview=$trustGalleryPreviewDuration finalized=$durationAlreadyFinalized',
     );
     int useMs;
@@ -1726,7 +1878,7 @@ class _MinisIndependentCaptureScreenState
     int? previewDurationMs,
   }) async {
     _logMulticlip(
-      '_appendGalleryVideoAfterPreview enter confirmed=${p.basename(confirmedPath)} '
+      '_appendGalleryVideoAfterPreview enter confirmed=${NativePaths.basename(confirmedPath)} '
       'mergeSupported=${minisMulticlipMergeSupported()} '
       'previewDurationMs=$previewDurationMs',
     );
@@ -1765,7 +1917,7 @@ class _MinisIndependentCaptureScreenState
       
       _logMulticlip(
         'duration after preview finalize: clipMs=$clipMs reported=$reported '
-        'path=${p.basename(confirmedPath)}',
+        'path=${NativePaths.basename(confirmedPath)}',
       );
       final used = _clipsTotalDurationMs;
       final cap = _sessionCapMs;
@@ -1851,45 +2003,23 @@ class _MinisIndependentCaptureScreenState
         }
       }
 
-      final picker = ImagePicker();
-      XFile? x;
-
+      PickedItem? x;
       try {
-        _logGallery('picker selection starting videoOnly=${widget.videoOnly}');
+        _logGallery('NativePicker selection starting videoOnly=${widget.videoOnly}');
         if (widget.videoOnly) {
-          x = await picker.pickVideo(source: ImageSource.gallery);
+          x = await NativePicker.pickVideo();
         } else {
-          // pickMedia is available on newer plugin versions
-          x = await picker.pickMedia();
+          final items = await NativePicker.pickMedia(multi: false);
+          if (items.isNotEmpty) x = items.first;
         }
-        _logGallery('picker done null=${x == null}');
+        _logGallery('NativePicker done null=${x == null}');
       } catch (e1) {
-        _logMulticlip('primary picker failed ($e1) — trying fallbacks');
-        try {
-          x = await picker.pickVideo(source: ImageSource.gallery);
-        } catch (e2) {
-          if (widget.videoOnly) {
-            _logMulticlip('videoOnly=true, pickVideo failed, ABORTING');
-            if (mounted) _toast(minisUserFriendlyException(e2));
-            return;
-          }
-          _logMulticlip('pickVideo failed, trying pickImage');
-          try {
-            x = await picker.pickImage(
-              source: ImageSource.gallery,
-              imageQuality: 92,
-            );
-          } catch (e3) {
-            _logMulticlip('picker fully failed: $e1 / $e2 / $e3');
-            if (mounted) {
-              _toast(minisUserFriendlyException(e3));
-            }
-            return;
-          }
-        }
+        _logMulticlip('NativePicker failed ($e1)');
+        if (mounted) _toast(minisUserFriendlyException(e1));
+        return;
       }
       if (x == null) {
-        _logGallery('ImagePicker result null (cancel or empty)');
+        _logGallery('NativePicker result null (cancel or empty)');
         _logMulticlip('picker returned null (user cancelled)');
         return;
       }
@@ -1898,7 +2028,7 @@ class _MinisIndependentCaptureScreenState
         _logMulticlip('ABORT after pick: not mounted');
         return;
       }
-      _logGallery('picked raw pathLen=${x.path.length} mime=${x.mimeType}');
+      _logGallery('picked raw pathLen=${x.path.length} mime=${x.mime}');
       final path = _normalizeLocalPickerPath(x.path);
       if (path.isEmpty) {
         _logGallery('normalized path empty');
@@ -1907,9 +2037,7 @@ class _MinisIndependentCaptureScreenState
         }
         return;
       }
-      final isVideo = _pickedXFileIsVideo(
-        XFile(path, mimeType: x.mimeType, name: x.name),
-      );
+      final isVideo = _pickedPathIsVideo(path, mime: x.mime);
       if (isVideo) {
         _logGallery('picked video — importing');
         await _importPickedGalleryVideoFromSourcePath(path);
@@ -1993,6 +2121,7 @@ class _MinisIndependentCaptureScreenState
         allowReelTrim: minisReelClipTrimmerPlatformSupported(),
         confirmOnClose: true,
         initialTotalDurationMs: durationForPreview,
+        musicSegment: _musicSegment,
       );
       if (!mounted) return;
       if (preview == null || preview.path.isEmpty) {
@@ -2014,7 +2143,16 @@ class _MinisIndependentCaptureScreenState
       MinisCaptureHost.completeCaptureResult(request.toMap());
       if (mounted) {
         final nav = Navigator.maybeOf(context, rootNavigator: true);
-        if (nav != null && nav.canPop()) nav.pop(request.toMap());
+        if (nav != null && nav.canPop()) {
+          nav.pop(request.toMap());
+        } else {
+          // Capture screen rendered as the root route (typical for the
+          // standalone example app). There's nothing to pop to, so hand the
+          // final path to the per-screen confirmation callback instead, so
+          // host apps that wire `onClipConfirmed` get a redirect to the
+          // editor screen.
+          widget.onClipConfirmed?.call(finalPath);
+        }
       }
       return;
     }
@@ -2074,15 +2212,16 @@ class _MinisIndependentCaptureScreenState
 
   Future<void> _persistCaptureFallback(String sourcePath) async {
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      final sub = Directory(p.join(dir.path, 'minis_captures'));
+      final dirPath = await NativePaths.documentsDir();
+      if (dirPath == null) return;
+      final sub = Directory(NativePaths.join([dirPath, 'minis_captures']));
       if (!await sub.exists()) {
         await sub.create(recursive: true);
       }
-      final ext = p.extension(sourcePath);
+      final ext = NativePaths.extension(sourcePath);
       final name =
           'minis_${DateTime.now().millisecondsSinceEpoch}${ext.isEmpty ? '' : ext}';
-      final dest = File(p.join(sub.path, name));
+      final dest = File(NativePaths.join([sub.path, name]));
       await File(sourcePath).copy(dest.path);
       if (mounted) {
         _toast('Saved to ${dest.path}');
@@ -2099,6 +2238,12 @@ class _MinisIndependentCaptureScreenState
     final eng = _engine;
     if (eng == null) return;
     final next = !_micEnabled;
+    // Block unmute attempts while music is active to prevent double-audio
+    // (mic capturing the speaker-played music guide track).
+    if (next && _musicSegment != null) {
+      _toast('Microphone is muted while music is active.');
+      return;
+    }
     _applyBusy(true, message: 'Updating microphone…');
     try {
       await eng.setRecordWithAudio(next);
@@ -2109,6 +2254,33 @@ class _MinisIndependentCaptureScreenState
       if (mounted) {
         _applyBusy(false);
       }
+    }
+  }
+
+  /// Auto-mute the mic when music is selected so the recorder does not capture
+  /// the speaker-played music guide alongside ambient noise, which would later
+  /// double up against the pure music track at merge/preview time.
+  ///
+  /// Wrapped in [_applyBusy] because `setRecordWithAudio` tears down and
+  /// re-initializes the [CameraController]; without hiding the preview the
+  /// in-flight `CameraPreview` widget can still reference the disposed
+  /// controller and throw "buildPreview() was called on a disposed
+  /// CameraController" mid-reinit.
+  Future<void> _autoMuteMicForMusic() async {
+    if (!_micEnabled) return;
+    final eng = _engine;
+    if (eng == null) {
+      if (mounted) setState(() => _micEnabled = false);
+      return;
+    }
+    _applyBusy(true, message: 'Muting microphone for music…');
+    try {
+      await eng.setRecordWithAudio(false);
+      if (mounted) setState(() => _micEnabled = false);
+    } catch (e) {
+      debugPrint('minis: auto-mute mic for music failed: $e');
+    } finally {
+      if (mounted) _applyBusy(false);
     }
   }
 
@@ -2126,6 +2298,230 @@ class _MinisIndependentCaptureScreenState
     } finally {
       if (mounted) {
         _applyBusy(false);
+      }
+    }
+  }
+
+  Future<void> _pickWhiteBalance() async {
+    if (_recording || _countingDown || _busy) return;
+    final picked = await showModalBottomSheet<MinisWhiteBalancePreset>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _WhiteBalanceSheet(active: _wb),
+    );
+    if (picked == null || !mounted || picked == _wb) return;
+    final eng = _engine;
+    if (eng == null) return;
+    _applyBusy(true, message: 'Setting ${picked.label} white balance…');
+    try {
+      await eng.setManual(wbKelvin: picked.kelvin);
+      if (mounted) setState(() => _wb = picked);
+      HapticFeedback.selectionClick();
+    } catch (e) {
+      _toast('WB error: ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) _applyBusy(false);
+    }
+  }
+
+  Future<void> _toggleHdr() async {
+    if (_recording || _countingDown || _busy) return;
+    final eng = _engine;
+    if (eng == null) return;
+    final want = !_hdrEnabled;
+    _applyBusy(true, message: want ? 'Enabling HDR…' : 'Disabling HDR…');
+    try {
+      final ok = await eng.enableHdr(want);
+      if (mounted) setState(() => _hdrEnabled = ok && want);
+      if (!ok && want) _toast('HDR not available on this lens.');
+    } catch (e) {
+      _toast('HDR error: ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) _applyBusy(false);
+    }
+  }
+
+  Future<void> _cycleSlowMo() async {
+    if (_recording || _countingDown || _busy) return;
+    final list = _caps.slowMoFps;
+    if (list.isEmpty) return;
+    final eng = _engine;
+    if (eng == null) return;
+    final nextIdx = _slowMoFpsIdx + 1 >= list.length ? -1 : _slowMoFpsIdx + 1;
+    final targetFps = nextIdx < 0 ? 0 : list[nextIdx];
+    _applyBusy(
+      true,
+      message: nextIdx < 0
+          ? 'Returning to normal speed…'
+          : 'Switching to ${list[nextIdx]} fps…',
+    );
+    try {
+      final res = await eng.enableSlowMo(targetFps);
+      if (!mounted) return;
+      if (nextIdx < 0 || res.enabled) {
+        setState(() => _slowMoFpsIdx = nextIdx);
+        _toast(nextIdx < 0 ? 'Slow-mo off' : 'Slow-mo ${res.actualFps} fps');
+      } else {
+        _toast('Slow-mo unavailable at that frame rate');
+      }
+    } catch (e) {
+      _toast('Slow-mo error: ${minisUserFriendlyException(e)}');
+    } finally {
+      if (mounted) _applyBusy(false);
+    }
+  }
+
+  /// Auto-dismiss the shutter coachmark after 6 seconds so first-time users
+  /// who explore the rail or gallery aren't blocked by it forever.
+  void _armShutterCoachmarkAutoDismiss() {
+    if (_shutterCoachmarkDismissed) return;
+    _shutterCoachmarkTimer?.cancel();
+    _shutterCoachmarkTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted || _shutterCoachmarkDismissed) return;
+      setState(() => _shutterCoachmarkDismissed = true);
+    });
+  }
+
+  Future<void> _probeEngineCapabilities() async {
+    final eng = _engine;
+    if (eng == null) return;
+    try {
+      final c = await eng.getCapabilities();
+      if (!mounted) return;
+      setState(() => _caps = c);
+    } catch (e) {
+      debugPrint('MINIS: getCapabilities failed: $e');
+    }
+  }
+
+  void _subscribeEngineStateStream() {
+    _stateSub?.cancel();
+    final eng = _engine;
+    if (eng == null) return;
+    try {
+      _stateSub = eng.stateStream.listen(
+        (event) {
+          if (!mounted) return;
+          if (event.state == MinisEngineState.error) {
+            final msg = event.message ?? 'Camera engine reported an error.';
+            _toast(msg);
+            setState(() {
+              _error = msg;
+              _recording = false;
+              _busy = false;
+            });
+          }
+        },
+        onError: (e) {
+          debugPrint('MINIS: stateStream listener error: $e');
+        },
+      );
+    } catch (e) {
+      debugPrint('MINIS: stateStream subscribe failed: $e');
+    }
+  }
+
+  Future<void> _maybePromptRecovery() async {
+    if (_recoveryPromptShown) return;
+    final eng = _engine;
+    if (eng == null) return;
+    MinisRecoveryInfo? info;
+    try {
+      info = await eng.probeRecovery();
+    } catch (e) {
+      debugPrint('MINIS: probeRecovery failed: $e');
+      return;
+    }
+    if (info == null || !mounted) return;
+    _recoveryPromptShown = true;
+    final wantRecover = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C1E),
+        title: const Text(
+          'Recover unfinished clip?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'A recording was interrupted. Recover it now, or discard.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Discard'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Recover'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (wantRecover == true) {
+      _applyBusy(true, message: 'Recovering clip…');
+      try {
+        final path = await eng.recoverAndFinalize();
+        if (!mounted) return;
+        if (path != null && path.isNotEmpty) {
+          await _appendVideoSegment(path, 0, durationAlreadyFinalized: false);
+          _toast('Recovered last recording.');
+        } else {
+          _toast('Nothing recoverable from previous session.');
+        }
+      } catch (e) {
+        _toast('Recovery failed: ${minisUserFriendlyException(e)}');
+      } finally {
+        if (mounted) _applyBusy(false);
+      }
+    } else {
+      try {
+        await eng.discardRecovery();
+      } catch (e) {
+        debugPrint('MINIS: discardRecovery failed: $e');
+      }
+    }
+  }
+
+  void _subscribeAudioLevels() {
+    _audioLevelsSub?.cancel();
+    final eng = _engine;
+    if (eng == null) return;
+    try {
+      _audioLevelsSub = eng.audioLevelsStream.listen(
+        (lv) {
+          if (!mounted) return;
+          if (!_recording || !_micEnabled) {
+            if (_liveAudioLevels != null) {
+              setState(() => _liveAudioLevels = null);
+            }
+            return;
+          }
+          setState(() => _liveAudioLevels = lv);
+        },
+        onError: (_) {},
+      );
+    } catch (e) {
+      debugPrint('MINIS: audioLevelsStream subscribe failed: $e');
+    }
+  }
+
+  /// Fires a light haptic at predetermined remaining-time milestones (5s, 3s,
+  /// 1s) before the session cap. Each milestone fires at most once per take.
+  void _emitLowBudgetHapticsIfNeeded() {
+    final remainingMs =
+        _sessionCapMs - _clipsTotalDurationMs - _liveClipElapsedMs;
+    if (remainingMs <= 0) return;
+    const milestonesMs = <int>[5000, 3000, 1000];
+    for (final ms in milestonesMs) {
+      if (remainingMs <= ms && !_lowBudgetHapticsFired.contains(ms)) {
+        _lowBudgetHapticsFired.add(ms);
+        HapticFeedback.lightImpact();
       }
     }
   }
@@ -2150,14 +2546,23 @@ class _MinisIndependentCaptureScreenState
       if (!mounted) return;
       _activeClipStartedAt = DateTime.now();
       _clipBudgetMsAtRecordStart = budgetMs;
+      // Hide transient HUD overlays so they don't obscure the recording.
+      _focusReticleHideTimer?.cancel();
+      _exposureSliderHideTimer?.cancel();
+      _focusReticleAt = null;
+      _exposureSliderVisible = false;
+      _zoomBadgeVisible = false;
       setState(() => _recording = true);
       // unawaited(_syncZoomRangeFromEngine()); // Removed to prevent freeze on recording start
       unawaited(_startGuideMusicForRecording());
       unawaited(_ensureGuideMusicPlayingAfterRecordStart());
       _clipElapsedTicker?.cancel();
+      _lowBudgetHapticsFired.clear();
       _clipElapsedTicker =
           Timer.periodic(const Duration(milliseconds: 50), (_) {
-        if (mounted && _recording) setState(() {});
+        if (!mounted || !_recording) return;
+        _emitLowBudgetHapticsIfNeeded();
+        setState(() {});
       });
       _maxRecordTimer?.cancel();
       _maxRecordTimer = Timer(cap, () {
@@ -2179,6 +2584,12 @@ class _MinisIndependentCaptureScreenState
   Future<void> _stopRecordingInternal({String? userMessage}) async {
     final eng = _engine;
     if (eng == null || !_recording) return;
+    _recordingLocked = false;
+    _lockReadyToEngage = false;
+    _holdVideoArmed = false;
+    _shutterFingerDown = false;
+    _pendingStopTap = false;
+    _lockDragProgress = 0;
     await _pauseGuideMusic();
     _maxRecordTimer?.cancel();
     _maxRecordTimer = null;
@@ -2194,7 +2605,6 @@ class _MinisIndependentCaptureScreenState
       _applyBusy(true, message: 'Saving…');
       final rawPath = await eng.stopRecording();
       if (!mounted) return;
-      _zoomGesturePointer = null;
       if (rawPath != null && rawPath.isNotEmpty) {
         // iOS: The camera plugin saves to tmp/ which is inaccessible to
         // AVAssetExportSession during composition (OSStatus error -12660).
@@ -2203,18 +2613,20 @@ class _MinisIndependentCaptureScreenState
         if (defaultTargetPlatform == TargetPlatform.iOS &&
             rawPath.contains('/tmp/')) {
           try {
-            final base = await getApplicationDocumentsDirectory();
+            final basePath = await NativePaths.documentsDir();
+            if (basePath == null) {
+              throw StateError('documents dir unavailable');
+            }
             final dir =
-                Directory(p.join(base.path, 'loopit_minis_captures'));
+                Directory(NativePaths.join([basePath, 'loopit_minis_captures']));
             if (!await dir.exists()) await dir.create(recursive: true);
-            final ext = p.extension(rawPath);
-            final dest = p.join(
+            final ext = NativePaths.extension(rawPath);
+            final dest = NativePaths.join([
               dir.path,
               'minis_cam_${DateTime.now().microsecondsSinceEpoch}$ext',
-            );
+            ]);
             await File(rawPath).copy(dest);
             path = dest;
-            // Clean up tmp file after copy.
             try {
               await File(rawPath).delete();
             } catch (_) {}
@@ -2224,7 +2636,10 @@ class _MinisIndependentCaptureScreenState
           }
         }
         final d = math.max(1, rawElapsed);
-        await _appendVideoSegment(path, d);
+        // Wall-clock from start/stop is authoritative for camera clips.
+        // Skip the slow re-probe loop (cost up to ~10s on short clips when
+        // file metadata reports the placeholder ~1s).
+        await _appendVideoSegment(path, d, durationAlreadyFinalized: true);
       } else {
         _toast('No video file from camera.');
       }
@@ -2234,7 +2649,6 @@ class _MinisIndependentCaptureScreenState
     } catch (e) {
       if (mounted) {
         setState(() => _recording = false);
-        _zoomGesturePointer = null;
       }
       _toast('Stop failed. ${minisUserFriendlyException(e)}');
     } finally {
@@ -2280,37 +2694,44 @@ class _MinisIndependentCaptureScreenState
     } catch (_) {}
   }
 
-  void _onPreviewZoomPointerDown(PointerDownEvent e) {
+  void _onPreviewScaleStart(ScaleStartDetails d) {
     if (_busy || _countingDown) return;
-    // Bug 8 fix: if the shutter finger is already down (hold-to-record),
-    // ignore new pointers on the preview area so zoom does not fire during
-    // recording start (user adjusting grip can accidentally swipe).
     if (_shutterFingerDown) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
-    _zoomGesturePointer = e.pointer;
-    _zoomPanStartY = e.localPosition.dy;
+    _zoomPanStartY = d.focalPoint.dy;
     _zoomPanStartLevel = _zoomLevel;
-    // Show the zoom HUD badge when a gesture begins.
+    _pinchStartZoomLevel = _zoomLevel;
+    _pinchAccumulatedScale = 1.0;
+    _zoomScaleActive = true;
     if (mounted) setState(() => _zoomBadgeVisible = true);
     _zoomBadgeTimer?.cancel();
   }
 
-  void _onPreviewZoomPointerMove(PointerMoveEvent e) {
-    // Bug 8 fix: also skip move events while the shutter is held.
+  void _onPreviewScaleUpdate(ScaleUpdateDetails d) {
     if (_busy || _countingDown || _shutterFingerDown) return;
-    if (e.pointer != _zoomGesturePointer) return;
+    if (!_zoomScaleActive) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
     final span = _zoomMax - _zoomMin;
     if (span <= 1e-6) return;
-    final h = MediaQuery.sizeOf(context).height;
-    if (h <= 0) return;
-    // Swipe up (smaller dy) → zoom in; swipe down → zoom out.
-    final deltaY = e.localPosition.dy - _zoomPanStartY;
-    const sensitivity = 1.75;
-    final rawTarget =
-        _zoomPanStartLevel - (deltaY / h) * span * sensitivity;
+
+    final isPinch = d.pointerCount >= 2;
+    double rawTarget;
+    if (isPinch) {
+      // Multi-touch pinch: scale relative to the level at pinch start.
+      _pinchAccumulatedScale = d.scale.clamp(0.05, 50.0);
+      rawTarget =
+          (_pinchStartZoomLevel * _pinchAccumulatedScale).clamp(_zoomMin, _zoomMax);
+    } else {
+      // Single-finger vertical drag: swipe up = zoom in.
+      final h = MediaQuery.sizeOf(context).height;
+      if (h <= 0) return;
+      final deltaY = d.focalPoint.dy - _zoomPanStartY;
+      const sensitivity = 1.75;
+      rawTarget =
+          _zoomPanStartLevel - (deltaY / h) * span * sensitivity;
+    }
     final target = rawTarget.clamp(_zoomMin, _zoomMax);
     const smooth = 0.42;
     var next = _zoomLevel + (target - _zoomLevel) * smooth;
@@ -2322,34 +2743,179 @@ class _MinisIndependentCaptureScreenState
     if (mounted) setState(() {});
   }
 
-  void _onPreviewZoomPointerUpOrCancel(PointerEvent e) {
-    if (e.pointer == _zoomGesturePointer) {
-      _zoomGesturePointer = null;
-      // Auto-hide the zoom badge 1.8s after the gesture ends.
-      _zoomBadgeTimer?.cancel();
-      _zoomBadgeTimer = Timer(const Duration(milliseconds: 1800), () {
-        if (mounted) setState(() => _zoomBadgeVisible = false);
-      });
+  void _onPreviewScaleEnd(ScaleEndDetails d) {
+    _zoomScaleActive = false;
+    _zoomBadgeTimer?.cancel();
+    _zoomBadgeTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted) setState(() => _zoomBadgeVisible = false);
+    });
+  }
+
+  /// Tap on the preview → animated focus reticle + engine focus call. We use
+  /// normalized [0,1] coordinates so engines independent of preview size can
+  /// translate to native sensor coordinates. Suppressed in filter mode since
+  /// the DeepAR engine doesn't implement tap-to-focus.
+  Future<void> _onPreviewTapToFocus(TapUpDetails d, Size canvasSize) async {
+    if (_busy || _countingDown) return;
+    if (_filterMode) return;
+    if (_aeAfLocked) {
+      _toast('AE/AF unlocked');
+      setState(() => _aeAfLocked = false);
+      return;
     }
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    final w = canvasSize.width;
+    final h = canvasSize.height;
+    if (w <= 0 || h <= 0) return;
+    final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
+    final ny = (d.localPosition.dy / h).clamp(0.0, 1.0);
+    setState(() {
+      _focusReticleAt = d.localPosition;
+    });
+    _focusReticleController
+      ..reset()
+      ..forward();
+    HapticFeedback.selectionClick();
+    _showExposureSlider();
+    _focusReticleHideTimer?.cancel();
+    _focusReticleHideTimer = Timer(const Duration(milliseconds: 1100), () {
+      if (!mounted) return;
+      setState(() => _focusReticleAt = null);
+    });
+    try {
+      await eng.tapToFocus(x: nx, y: ny);
+    } catch (e) {
+      debugPrint('MINIS: tapToFocus failed: $e');
+    }
+  }
+
+  /// Long-press on preview → lock AE/AF visually. Pure UI flag (engine port
+  /// has no lock API yet); cleared by next tap.
+  void _onPreviewLongPressToLock(LongPressStartDetails d, Size canvasSize) {
+    if (_busy || _countingDown || _filterMode) return;
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    final w = canvasSize.width;
+    final h = canvasSize.height;
+    if (w <= 0 || h <= 0) return;
+    final nx = (d.localPosition.dx / w).clamp(0.0, 1.0);
+    final ny = (d.localPosition.dy / h).clamp(0.0, 1.0);
+    setState(() {
+      _focusReticleAt = d.localPosition;
+      _aeAfLocked = true;
+    });
+    _focusReticleController
+      ..reset()
+      ..forward();
+    _focusReticleHideTimer?.cancel();
+    HapticFeedback.mediumImpact();
+    _toast('AE/AF locked — tap to unlock');
+    try {
+      unawaited(eng.tapToFocus(x: nx, y: ny));
+    } catch (_) {}
+  }
+
+  /// Make the EV slider visible for ~3.2s; re-arm timer on each interaction.
+  void _showExposureSlider() {
+    _exposureSliderHideTimer?.cancel();
+    if (!_exposureSliderVisible && mounted) {
+      setState(() => _exposureSliderVisible = true);
+    }
+    _exposureSliderHideTimer = Timer(const Duration(milliseconds: 3200), () {
+      if (!mounted) return;
+      setState(() => _exposureSliderVisible = false);
+    });
+  }
+
+  Future<void> _onExposureBiasChanged(double next) async {
+    var clamped = next.clamp(_kExposureMin, _kExposureMax).toDouble();
+    // Snap to zero when within 0.1 EV so users land at neutral cleanly.
+    if (clamped.abs() < 0.1) clamped = 0.0;
+    if ((clamped - _exposureBias).abs() < 0.01) return;
+    setState(() => _exposureBias = clamped);
+    _showExposureSlider();
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    try {
+      await eng.setExposureBias(clamped);
+    } catch (e) {
+      debugPrint('MINIS: setExposureBias failed: $e');
+    }
+  }
+
+  /// Bottom-sheet picker for the framing guide. Long-press the rail action to
+  /// quick-cycle instead (see [_cycleAspectRatio]).
+  Future<void> _pickAspectRatio() async {
+    if (_recording || _countingDown || _busy) return;
+    final picked = await showModalBottomSheet<MinisAspectRatio>(
+      context: context,
+      backgroundColor: const Color(0xFF1C1C1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => _AspectRatioSheet(active: _aspectRatio),
+    );
+    if (picked == null || !mounted) return;
+    if (picked == _aspectRatio) return;
+    setState(() => _aspectRatio = picked);
+    MinisCaptureSessionPrefs.instance.aspectRatio = picked;
+    HapticFeedback.selectionClick();
+  }
+
+  /// Cycle UI framing guide (rail long-press shortcut).
+  void _cycleAspectRatio() {
+    if (_recording || _countingDown) return;
+    const order = MinisAspectRatio.values;
+    final idx = order.indexOf(_aspectRatio);
+    final next = order[(idx + 1) % order.length];
+    setState(() => _aspectRatio = next);
+    MinisCaptureSessionPrefs.instance.aspectRatio = next;
+    HapticFeedback.selectionClick();
+  }
+
+  /// Jump zoom to a preset multiplier (e.g. 1x, 2x). Clamped to engine range.
+  Future<void> _setZoomPreset(double level) async {
+    if (_busy || _countingDown) return;
+    final eng = _engine;
+    if (eng == null || !eng.isInitialized) return;
+    final span = _zoomMax - _zoomMin;
+    if (span <= 1e-6) return;
+    final target = level.clamp(_zoomMin, _zoomMax).toDouble();
+    if ((target - _zoomLevel).abs() < 0.005) return;
+    _zoomLevel = target;
+    try {
+      await eng.setZoomLevel(target);
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _zoomBadgeVisible = true;
+    });
+    HapticFeedback.selectionClick();
+    _zoomBadgeTimer?.cancel();
+    _zoomBadgeTimer = Timer(const Duration(milliseconds: 1400), () {
+      if (mounted) setState(() => _zoomBadgeVisible = false);
+    });
   }
 
   void _onShutterPointerDown(PointerDownEvent event) {
     if (_busy || _countingDown) return;
     final eng = _engine;
     if (eng == null || !eng.isInitialized) return;
-    // Already recording: this press is a tap-to-stop. Handle on pointer up
-    // so the user can briefly press the (stop-icon) shutter without arming
-    // the hold-to-record timer.
-    if (_recording) return;
+    if (!_shutterCoachmarkDismissed) {
+      _shutterCoachmarkDismissed = true;
+    }
+    // Already recording (hands-free locked): mark this press as tap-to-stop;
+    // actual stop fires on PointerUp so a quick press cancels cleanly.
+    if (_recording) {
+      _pendingStopTap = true;
+      return;
+    }
     if (_clipsTotalDurationMs >= _sessionCapMs) {
       _toast('Recording limit reached.');
       return;
     }
-    // Bug 8 fix: cancel any in-progress zoom gesture when the shutter goes
-    // down. Without this, a grip-shift during the 280ms hold window would
-    // continue moving zoom even though the preview Listener already ignores
-    // the same pointer after _shutterFingerDown becomes true.
-    _zoomGesturePointer = null;
+    _zoomScaleActive = false;
     _zoomBadgeTimer?.cancel();
     if (_zoomBadgeVisible && mounted) {
       setState(() => _zoomBadgeVisible = false);
@@ -2358,34 +2924,77 @@ class _MinisIndependentCaptureScreenState
     _holdStartTimer?.cancel();
     _shutterFingerDown = true;
     _holdVideoArmed = false;
+    _lockReadyToEngage = false;
+    _recordingLocked = false;
+    _lockDragProgress = 0;
+    _shutterPointerStartDx = event.localPosition.dx;
     _holdStartTimer = Timer(const Duration(milliseconds: 280), () {
       if (!mounted || !_shutterFingerDown) return;
       _holdVideoArmed = true;
-      // Recording is now armed and starting. Release the shutter-finger
-      // lock so the user can lift their finger (recording keeps running
-      // until they tap the stop button) and so zoom gestures on the
-      // preview work during recording.
-      _shutterFingerDown = false;
+      // Recording starts while finger is still down. Lock indicator is
+      // displayed; dragging finger upward past _kLockTriggerDistance engages
+      // hands-free lock so recording continues after release.
+      HapticFeedback.lightImpact();
       unawaited(_startRecordingInternal());
+      if (mounted) setState(() {});
     });
   }
 
-  void _onShutterPointerUpOrCancel() {
+  void _onShutterPointerMove(PointerMoveEvent event) {
+    if (!_shutterFingerDown) return;
+    if (!_holdVideoArmed || !_recording || _recordingLocked) return;
+    final dx = event.localPosition.dx - _shutterPointerStartDx;
+    final progress = (-dx / _kLockTriggerDistance).clamp(0.0, 1.0);
+    if (dx <= -_kLockTriggerDistance) {
+      _recordingLocked = true;
+      _shutterFingerDown = false;
+      _holdVideoArmed = false;
+      _lockReadyToEngage = false;
+      _lockDragProgress = 1.0;
+      HapticFeedback.mediumImpact();
+      _toast('Hands-free recording — tap shutter to stop.');
+      if (mounted) setState(() {});
+      return;
+    }
+    final nowHot = dx <= -_kLockTriggerDistance * 0.55;
+    final progressChanged = (progress - _lockDragProgress).abs() > 0.02;
+    if (nowHot != _lockReadyToEngage || progressChanged) {
+      _lockReadyToEngage = nowHot;
+      _lockDragProgress = progress;
+      if (mounted) setState(() {});
+    }
+  }
+
+  void _onShutterPointerUpOrCancel({bool cancelled = false}) {
     _holdStartTimer?.cancel();
     _holdStartTimer = null;
     final wasHold = _holdVideoArmed;
     _shutterFingerDown = false;
     _holdVideoArmed = false;
-    if (wasHold) {
-      // Recording started via this hold and keeps running after release.
-      // The user stops it with a tap on the shutter (handled below).
+    final wasReadyHint = _lockReadyToEngage;
+    _lockReadyToEngage = false;
+    if (_pendingStopTap) {
+      _pendingStopTap = false;
+      if (!cancelled && _recording) {
+        unawaited(_stopRecordingInternal());
+      }
       return;
     }
-    if (_recording) {
-      // Tap-to-stop while recording is active.
+    if (_recordingLocked) {
+      // Lock-engage gesture release: keep recording running hands-free.
+      if (mounted && wasReadyHint) setState(() {});
+      return;
+    }
+    if (wasHold && _recording) {
+      // Hold-to-record release without lock: stop recording.
       unawaited(_stopRecordingInternal());
       return;
     }
+    if (_recording) {
+      unawaited(_stopRecordingInternal());
+      return;
+    }
+    if (cancelled) return;
     if (widget.videoOnly) {
       _toast('Video only — hold to record.');
       return;
@@ -2417,9 +3026,13 @@ class _MinisIndependentCaptureScreenState
       for (var i = sec; i > 0; i--) {
         if (!mounted) return;
         setState(() => _countdownTick = i);
+        if (i <= 3) {
+          HapticFeedback.selectionClick();
+        }
         await Future<void>.delayed(const Duration(seconds: 1));
       }
       if (!mounted) return;
+      HapticFeedback.mediumImpact();
       setState(() {
         _countingDown = false;
         _countdownTick = null;
@@ -2540,31 +3153,36 @@ class _MinisIndependentCaptureScreenState
       width: _kRailColumnWidth,
       child: Opacity(
         opacity: disabled ? 0.45 : 1,
-        child: InkWell(
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                SizedBox(
-                  height: _kRailIconSlotHeight,
-                  child: Center(
-                    child: PhosphorIcon(
-                      icon,
-                      color: iconColor ?? Colors.white,
-                      size: _kRailIconSize,
+        child: Semantics(
+          button: true,
+          label: subtitle == null ? label : '$label, $subtitle',
+          enabled: !disabled,
+          child: InkWell(
+            onTap: onTap,
+            onLongPress: onLongPress,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    height: _kRailIconSlotHeight,
+                    child: Center(
+                      child: Icon(
+                        icon,
+                        color: iconColor ?? Colors.white,
+                        size: _kRailIconSize,
+                      ),
                     ),
                   ),
-                ),
-                SizedBox(
-                  height: subtitle == null ? _kRailLabelSlotHeight : 40,
-                  width: _kRailColumnWidth,
-                  child: Center(child: labelChild),
-                ),
-              ],
+                  SizedBox(
+                    height: subtitle == null ? _kRailLabelSlotHeight : 40,
+                    width: _kRailColumnWidth,
+                    child: Center(child: labelChild),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -2591,10 +3209,10 @@ class _MinisIndependentCaptureScreenState
                 SizedBox(
                   height: _kRailIconSlotHeight,
                   child: Center(
-                    child: PhosphorIcon(
+                    child: Icon(
                       _railExpanded
-                          ? PhosphorIconsRegular.caretUp
-                          : PhosphorIconsRegular.caretDown,
+                          ? Icons.keyboard_arrow_up
+                          : Icons.keyboard_arrow_down,
                       color: Colors.white,
                       size: _kRailChevronSize,
                     ),
@@ -2612,29 +3230,416 @@ class _MinisIndependentCaptureScreenState
     );
   }
 
+  Widget _buildRecordingStopIcon() {
+    return AnimatedBuilder(
+      animation: _recordPulseController,
+      builder: (context, child) {
+        final t = _recordPulseController.value;
+        final scale = 0.86 + 0.14 * t;
+        final glow = 0.35 + 0.45 * t;
+        return Stack(
+          alignment: Alignment.center,
+          children: [
+            Container(
+              width: _kShutterStopIconSize + 14,
+              height: _kShutterStopIconSize + 14,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.redAccent.withValues(alpha: glow * 0.55),
+                    blurRadius: 14 + 8 * t,
+                    spreadRadius: 1.5,
+                  ),
+                ],
+              ),
+            ),
+            Transform.scale(scale: scale, child: child),
+          ],
+        );
+      },
+      child: const Icon(
+        Icons.stop,
+        color: Colors.redAccent,
+        size: _kShutterStopIconSize,
+      ),
+    );
+  }
+
+  Widget _buildLockTrail() {
+    final progress = _lockDragProgress.clamp(0.0, 1.0);
+    return Align(
+      alignment: Alignment.centerRight,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 70),
+        curve: Curves.easeOut,
+        width: 32 * progress,
+        height: 6,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.centerRight,
+            end: Alignment.centerLeft,
+            colors: [
+              Colors.redAccent,
+              Color(0x99FF5252),
+            ],
+          ),
+          borderRadius: BorderRadius.circular(4),
+          boxShadow: progress > 0.05
+              ? [
+                  BoxShadow(
+                    color: Colors.redAccent.withValues(alpha: 0.55),
+                    blurRadius: 10,
+                    spreadRadius: 1,
+                  ),
+                ]
+              : null,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLockHint() {
+    const pillSize = 46.0;
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutBack,
+      tween: Tween<double>(begin: 0.55, end: 1.0),
+      builder: (context, entryScale, child) {
+        return Transform.scale(scale: entryScale, child: child);
+      },
+      child: AnimatedBuilder(
+      animation: _lockPulseController,
+      builder: (context, _) {
+        final pulse = _lockPulseController.value;
+        final hot = _lockReadyToEngage;
+        final progress = _lockDragProgress.clamp(0.0, 1.0);
+        final basePulseScale =
+            1.0 + (hot ? 0.0 : 0.10 * math.sin(pulse * 2 * math.pi));
+        return SizedBox(
+          width: 96,
+          height: pillSize + 24,
+          child: Stack(
+            alignment: Alignment.center,
+            clipBehavior: Clip.none,
+            children: [
+              // Chevron hints drifting leftward — hides as user drags in.
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: Opacity(
+                  opacity: (1.0 - progress).clamp(0.0, 1.0) * 0.85,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(3, (i) {
+                      final phase = (pulse + i * 0.18) % 1.0;
+                      final fade = (math.sin(phase * math.pi)).clamp(0.0, 1.0);
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 1),
+                        child: Opacity(
+                          opacity: 0.25 + 0.6 * fade,
+                          child: Transform.translate(
+                            offset: Offset(-6 * phase, 0),
+                            child: const Icon(
+                              Icons.chevron_left,
+                              color: Colors.white,
+                              size: 12,
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+              ),
+              // Pulsing halo behind pill.
+              Transform.scale(
+                scale: hot ? 1.18 : basePulseScale,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  width: pillSize + 10,
+                  height: pillSize + 10,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: (hot
+                            ? Colors.redAccent
+                            : Colors.white)
+                        .withValues(alpha: hot ? 0.30 : 0.12),
+                  ),
+                ),
+              ),
+              // Pill body.
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                width: pillSize,
+                height: pillSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: hot
+                      ? Colors.redAccent.withValues(alpha: 0.95)
+                      : Colors.black.withValues(alpha: 0.62),
+                  border: Border.all(
+                    color: Colors.white
+                        .withValues(alpha: hot ? 0.98 : 0.72),
+                    width: 1.6,
+                  ),
+                  boxShadow: hot
+                      ? [
+                          BoxShadow(
+                            color: Colors.redAccent.withValues(alpha: 0.55),
+                            blurRadius: 14,
+                            spreadRadius: 1,
+                          ),
+                        ]
+                      : null,
+                ),
+                alignment: Alignment.center,
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 160),
+                  transitionBuilder: (child, anim) => ScaleTransition(
+                    scale: anim,
+                    child: FadeTransition(opacity: anim, child: child),
+                  ),
+                  child: Icon(
+                    hot
+                        ? Icons.lock
+                        : Icons.lock_outline,
+                    key: ValueKey<bool>(hot),
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    ),
+    );
+  }
+
+  /// Discrete zoom presets (0.5x / 1x / 2x), shown only when the engine reports
+  /// a meaningful range that includes them. Falls back to hidden otherwise.
+  Widget _buildZoomPresetRow() {
+    final span = _zoomMax - _zoomMin;
+    if (span < 0.5) return const SizedBox.shrink();
+    final candidates = <double>[];
+    if (_zoomMin <= 0.5 + 1e-3) candidates.add(0.5);
+    candidates.add(1.0);
+    if (_zoomMax >= 2.0 - 1e-3) candidates.add(2.0);
+    final shown = candidates
+        .where((v) => v >= _zoomMin - 1e-3 && v <= _zoomMax + 1e-3)
+        .toList();
+    if (shown.length < 2) return const SizedBox.shrink();
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.42),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final v in shown) ...[
+              _zoomPresetChip(v),
+              const SizedBox(width: 2),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _zoomPresetChip(double value) {
+    final selected = (_zoomLevel - value).abs() < 0.06;
+    final labelStr = value == value.roundToDouble()
+        ? '${value.toStringAsFixed(0)}×'
+        : '${value.toStringAsFixed(1)}×';
+    return Semantics(
+      button: true,
+      label: 'Zoom $labelStr',
+      selected: selected,
+      child: InkResponse(
+        onTap: () => unawaited(_setZoomPreset(value)),
+        radius: 28,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 38,
+          height: 38,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: selected
+                ? Colors.white.withValues(alpha: 0.92)
+                : Colors.transparent,
+          ),
+          child: Text(
+            labelStr,
+            style: TextStyle(
+              color: selected ? Colors.black : Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              height: 1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _roundSecondaryButton({
     required IconData icon,
     required VoidCallback? onPressed,
     bool filled = true,
+    String? semanticLabel,
   }) {
-    return Material(
-      color: filled
-          ? Colors.white.withValues(alpha: 0.22)
-          : Colors.white.withValues(alpha: 0.08),
-      shape: const CircleBorder(),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onPressed,
-        customBorder: const CircleBorder(),
-        child: SizedBox(
-          width: _kCornerBtnSize,
-          height: _kCornerBtnSize,
-          child: PhosphorIcon(
-            icon,
-            color: onPressed == null
-                ? Colors.white.withValues(alpha: 0.35)
-                : Colors.white,
-            size: _kCornerIconSize,
+    return Semantics(
+      button: true,
+      enabled: onPressed != null,
+      label: semanticLabel,
+      child: Material(
+        color: filled
+            ? Colors.white.withValues(alpha: 0.22)
+            : Colors.white.withValues(alpha: 0.08),
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          customBorder: const CircleBorder(),
+          child: SizedBox(
+            width: _kCornerBtnSize,
+            height: _kCornerBtnSize,
+            child: Icon(
+              icon,
+              color: onPressed == null
+                  ? Colors.white.withValues(alpha: 0.35)
+                  : Colors.white,
+              size: _kCornerIconSize,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Vertical exposure slider (-2..+2 EV). Drag up = brighter. Bias label
+  /// floats next to the thumb; tap the sun icon to reset to 0.
+  Widget _buildExposureSlider() {
+    return Semantics(
+      label: 'Exposure ${_exposureBias.toStringAsFixed(1)} EV',
+      slider: true,
+      child: SizedBox(
+        width: 36,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            GestureDetector(
+              onTap: () => unawaited(_onExposureBiasChanged(0)),
+              child: const Padding(
+                padding: EdgeInsets.only(bottom: 4),
+                child: Icon(
+                  Icons.wb_sunny,
+                  color: Color(0xFFFFD96A),
+                  size: 18,
+                ),
+              ),
+            ),
+            Expanded(
+              child: RotatedBox(
+                quarterTurns: -1,
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2,
+                    thumbColor: const Color(0xFFFFD96A),
+                    activeTrackColor: const Color(0xFFFFD96A),
+                    inactiveTrackColor: Colors.white24,
+                    overlayShape: SliderComponentShape.noOverlay,
+                  ),
+                  child: Slider(
+                    min: _kExposureMin,
+                    max: _kExposureMax,
+                    value: _exposureBias,
+                    onChanged: (v) => unawaited(_onExposureBiasChanged(v)),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 2,
+                ),
+                child: Text(
+                  _exposureBias > 0
+                      ? '+${_exposureBias.toStringAsFixed(1)}'
+                      : _exposureBias.toStringAsFixed(1),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    height: 1,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShutterCoachmark() {
+    return TweenAnimationBuilder<double>(
+      duration: const Duration(milliseconds: 360),
+      curve: Curves.easeOutCubic,
+      tween: Tween<double>(begin: 0, end: 1),
+      builder: (context, t, child) {
+        return Opacity(opacity: t, child: child);
+      },
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.16),
+            width: 1,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.touch_app,
+                color: Color(0xFF7DD3FC),
+                size: 18,
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  widget.videoOnly
+                      ? 'Hold the shutter to record · slide left to lock'
+                      : 'Tap shutter for photo · hold for video',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    height: 1.25,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -2690,7 +3695,7 @@ class _MinisIndependentCaptureScreenState
                 const SizedBox(height: 20),
                 FilledButton(
                   onPressed: () async {
-                    await openAppSettings();
+                    await NativePermissions.openSettings();
                   },
                   child: const Text('Open settings'),
                 ),
@@ -2750,6 +3755,12 @@ class _MinisIndependentCaptureScreenState
         fit: StackFit.expand,
         clipBehavior: Clip.hardEdge,
         children: [
+          if (eng == null && _busy && !kIsWeb &&
+              (defaultTargetPlatform == TargetPlatform.android ||
+                  defaultTargetPlatform == TargetPlatform.iOS))
+            const Positioned.fill(
+              child: _MinisBootPreviewMount(),
+            ),
           if (eng != null && !_busy)
             Positioned.fill(child: eng.buildPreview(context)),
           if (_busy)
@@ -2792,14 +3803,99 @@ class _MinisIndependentCaptureScreenState
             ),
           if (eng != null && !_busy && !_countingDown)
             Positioned.fill(
-              child: Listener(
-                behavior: HitTestBehavior.translucent,
-                onPointerDown: _onPreviewZoomPointerDown,
-                onPointerMove: _onPreviewZoomPointerMove,
-                onPointerUp: _onPreviewZoomPointerUpOrCancel,
-                onPointerCancel: _onPreviewZoomPointerUpOrCancel,
-                child: const SizedBox.expand(),
+              child: LayoutBuilder(
+                builder: (ctx, c) {
+                  final size = Size(c.maxWidth, c.maxHeight);
+                  return GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onScaleStart: _onPreviewScaleStart,
+                    onScaleUpdate: _onPreviewScaleUpdate,
+                    onScaleEnd: _onPreviewScaleEnd,
+                    onTapUp: (d) =>
+                        unawaited(_onPreviewTapToFocus(d, size)),
+                    onDoubleTap: (_busy || _recording || _countingDown)
+                        ? null
+                        : () => unawaited(_flip()),
+                    onLongPressStart: (d) =>
+                        _onPreviewLongPressToLock(d, size),
+                    child: const SizedBox.expand(),
+                  );
+                },
               ),
+            ),
+          if (eng != null &&
+              !_busy &&
+              !_countingDown &&
+              _aspectRatio != MinisAspectRatio.full)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: _AspectFramingPainter(_aspectRatio.ratio!),
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && !_countingDown && _gridVisible)
+            const Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(painter: _RuleOfThirdsGridPainter()),
+              ),
+            ),
+          if (eng != null && !_busy && _focusReticleAt != null)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedBuilder(
+                  animation: _focusReticleController,
+                  builder: (context, _) {
+                    final t = _focusReticleController.value;
+                    return CustomPaint(
+                      painter: _FocusReticlePainter(
+                        center: _focusReticleAt!,
+                        progress: _aeAfLocked ? 0.0 : t,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && _aeAfLocked && _focusReticleAt != null)
+            Positioned(
+              left: (_focusReticleAt!.dx - 40).clamp(8.0, 9999.0),
+              top: (_focusReticleAt!.dy + 48).clamp(0.0, 9999.0),
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: const Color(0xCC1B2A3A),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: const Color(0xFF7DD3FC),
+                      width: 1,
+                    ),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 3,
+                    ),
+                    child: Text(
+                      'AE/AF LOCK',
+                      style: TextStyle(
+                        color: Color(0xFF7DD3FC),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && _exposureSliderVisible)
+            Positioned(
+              right: 14,
+              top: topPad + 110,
+              bottom: bottomPad + 220,
+              child: _buildExposureSlider(),
             ),
           // Bug 8 fix: zoom level HUD badge — shown during vertical drag gesture.
           // Appears at the left-centre of the preview and auto-fades after lift.
@@ -2846,6 +3942,26 @@ class _MinisIndependentCaptureScreenState
             top: 0,
             left: 0,
             right: 0,
+            height: topPad + 56,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.45),
+                      Colors.black.withValues(alpha: 0.0),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
             child: SafeArea(
               bottom: false,
               child: Padding(
@@ -2868,39 +3984,22 @@ class _MinisIndependentCaptureScreenState
                       ),
                     ),
                     const Spacer(),
-                    if (_recording)
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Colors.red.withValues(alpha: 0.92),
-                          borderRadius: BorderRadius.circular(22),
+                    if (_recording) ...[
+                      _RecPill(
+                        elapsedLabel: minisFormatClipDurationLabel(
+                          _clipsTotalDurationMs + _liveClipElapsedMs,
                         ),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              PhosphorIcon(
-                                PhosphorIconsRegular.videoCamera,
-                                color: Colors.white,
-                                size: _kStatusPillIconSize,
-                              ),
-                              SizedBox(width: 6),
-                              Text(
-                                'REC',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 12,
-                                  height: 1,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
+                        pulse: _recordPulseController,
                       ),
+                      if (_micEnabled && _liveAudioLevels != null) ...[
+                        const SizedBox(width: 8),
+                        _AudioLevelMeter(levels: _liveAudioLevels!),
+                      ],
+                      if (!_micEnabled && _musicSegment == null) ...[
+                        const SizedBox(width: 8),
+                        const _MicMutedPill(),
+                      ],
+                    ],
                   ],
                 ),
               ),
@@ -2966,14 +4065,14 @@ class _MinisIndependentCaptureScreenState
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _railAction(
-                    icon: PhosphorIconsRegular.cameraRotate,
+                    icon: Icons.flip_camera_ios,
                     label: 'Flip',
                     onTap:
                         (_busy || _recording || _countingDown) ? null : _flip,
                   ),
                   if (_railExpanded) ...[
                     _railAction(
-                      icon: PhosphorIconsRegular.musicNotes,
+                      icon: Icons.music_note,
                       label: _musicSegment == null ? 'Sounds' : 'Music',
                       subtitle: _musicSegment != null ? 'Long-press: clear' : null,
                       iconColor: _musicSegment != null
@@ -2990,34 +4089,119 @@ class _MinisIndependentCaptureScreenState
                           : () => unawaited(_clearMusic()),
                     ),
                     _railAction(
-                      icon: PhosphorIconsRegular.gauge,
+                      icon: Icons.speed,
                       label: _speedRailLabel,
                       onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : () => unawaited(_pickSpeed()),
+                      onLongPress: (_busy || _recording || _countingDown)
                           ? null
                           : _cycleSpeed,
                     ),
                     if (!widget.videoOnly)
                       _railAction(
-                        icon: PhosphorIconsRegular.timer,
+                        icon: Icons.timer,
                         label: _timerRailLabel,
                         onTap: (_busy || _recording || _countingDown)
                             ? null
                             : _cycleCountdownMode,
                       ),
+                    _railAction(
+                      icon: Icons.auto_awesome,
+                      label: _activeFilter == null ? 'Filters' : 'Filter',
+                      subtitle: _activeFilter?.name,
+                      iconColor: _activeFilter != null
+                          ? const Color(0xFF7DD3FC)
+                          : null,
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : _pickFilter,
+                      onLongPress: (_busy ||
+                              _recording ||
+                              _countingDown ||
+                              _activeFilter == null)
+                          ? null
+                          : () => unawaited(_setFilter(null)),
+                    ),
                   ],
+                  if (_caps.hdr10)
+                    _railAction(
+                      icon: _hdrEnabled
+                          ? Icons.hdr_on
+                          : Icons.hdr_off,
+                      label: 'HDR',
+                      iconColor:
+                          _hdrEnabled ? const Color(0xFF7DD3FC) : null,
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : _toggleHdr,
+                    ),
+                  if (_caps.manualWb)
+                    _railAction(
+                      icon: _wb.icon,
+                      label: 'WB',
+                      subtitle: _wb.label,
+                      iconColor: _wb == MinisWhiteBalancePreset.auto
+                          ? null
+                          : const Color(0xFF7DD3FC),
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : () => unawaited(_pickWhiteBalance()),
+                    ),
+                  if (_caps.slowMoFps.isNotEmpty)
+                    _railAction(
+                      icon: Icons.slow_motion_video,
+                      label: 'Slo-mo',
+                      subtitle: _slowMoFpsIdx < 0
+                          ? 'off'
+                          : '${_caps.slowMoFps[_slowMoFpsIdx]} fps',
+                      iconColor: _slowMoFpsIdx >= 0
+                          ? const Color(0xFF7DD3FC)
+                          : null,
+                      onTap: (_busy || _recording || _countingDown)
+                          ? null
+                          : _cycleSlowMo,
+                    ),
                   _railAction(
                     icon: eng?.isTorchOn == true
-                        ? PhosphorIconsRegular.lightning
-                        : PhosphorIconsRegular.lightningSlash,
+                        ? Icons.flash_on
+                        : Icons.flash_off,
                     label: 'Flash',
                     onTap: (_busy || _recording || _countingDown)
                         ? null
                         : _toggleTorch,
                   ),
                   _railAction(
+                    icon: _gridVisible ? Icons.grid_on : Icons.grid_off,
+                    label: 'Grid',
+                    iconColor:
+                        _gridVisible ? const Color(0xFF7DD3FC) : null,
+                    onTap: (_busy || _countingDown)
+                        ? null
+                        : () {
+                            setState(() => _gridVisible = !_gridVisible);
+                            MinisCaptureSessionPrefs.instance.gridVisible =
+                                _gridVisible;
+                          },
+                  ),
+                  _railAction(
+                    icon: Icons.aspect_ratio,
+                    label: 'Frame',
+                    subtitle: _aspectRatio.shortLabel,
+                    iconColor: _aspectRatio == MinisAspectRatio.full
+                        ? null
+                        : const Color(0xFF7DD3FC),
+                    onTap: (_busy || _recording || _countingDown)
+                        ? null
+                        : () => unawaited(_pickAspectRatio()),
+                    onLongPress: (_busy || _recording || _countingDown)
+                        ? null
+                        : _cycleAspectRatio,
+                  ),
+                  _railAction(
                     icon: _micEnabled
-                        ? PhosphorIconsRegular.microphone
-                        : PhosphorIconsRegular.microphoneSlash,
+                        ? Icons.mic
+                        : Icons.mic_off,
                     label: 'Mic',
                     onTap: (_busy || _recording || _countingDown)
                         ? null
@@ -3039,18 +4223,41 @@ class _MinisIndependentCaptureScreenState
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          '$_countdownTick',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 96,
-                            fontWeight: FontWeight.w200,
-                            height: 1,
-                          ),
+                        TweenAnimationBuilder<double>(
+                          key: ValueKey<int>(_countdownTick!),
+                          duration: const Duration(seconds: 1),
+                          curve: Curves.linear,
+                          tween: Tween<double>(begin: 1.0, end: 0.0),
+                          builder: (context, t, _) {
+                            return SizedBox(
+                              width: 168,
+                              height: 168,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  CustomPaint(
+                                    size: const Size(168, 168),
+                                    painter: _CountdownRingPainter(
+                                      progress: t,
+                                    ),
+                                  ),
+                                  Text(
+                                    '$_countdownTick',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 96,
+                                      fontWeight: FontWeight.w200,
+                                      height: 1,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          'Tap to cancel',
+                          'Tap anywhere to cancel',
                           style: TextStyle(
                             color: Colors.white.withValues(alpha: 0.85),
                             fontSize: 14,
@@ -3060,6 +4267,48 @@ class _MinisIndependentCaptureScreenState
                     ),
                   ),
                 ),
+              ),
+            ),
+          if (eng != null && !_busy && _recording)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: bottomPad + 220,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.55),
+                        Colors.black.withValues(alpha: 0.0),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          if (eng != null && !_busy && !_countingDown && !_recording)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: bottomPad + 230,
+              child: Center(child: _buildZoomPresetRow()),
+            ),
+          if (eng != null &&
+              !_busy &&
+              !_countingDown &&
+              !_recording &&
+              _videoClips.isEmpty &&
+              !_shutterCoachmarkDismissed)
+            Positioned(
+              left: 24,
+              right: 24,
+              bottom: bottomPad + 190,
+              child: IgnorePointer(
+                child: Center(child: _buildShutterCoachmark()),
               ),
             ),
           Positioned(
@@ -3083,7 +4332,8 @@ class _MinisIndependentCaptureScreenState
                           // show undo (delete) when a clip exists so user can re-capture.
                           child: _videoClips.isNotEmpty
                               ? _roundSecondaryButton(
-                                  icon: PhosphorIconsRegular.arrowUUpLeft,
+                                  icon: Icons.undo,
+                                  semanticLabel: 'Remove last clip',
                                   onPressed: (_busy ||
                                           _recording ||
                                           _countingDown)
@@ -3093,7 +4343,9 @@ class _MinisIndependentCaptureScreenState
                                           ),
                                 )
                               : _roundSecondaryButton(
-                                  icon: PhosphorIconsRegular.images,
+                                  icon: Icons.photo_library,
+                                  semanticLabel:
+                                      'Open gallery to import a clip',
                                   onPressed: (_busy ||
                                           _recording ||
                                           _countingDown)
@@ -3160,32 +4412,70 @@ class _MinisIndependentCaptureScreenState
                                       strokeWidth: _kRecordingRingStroke,
                                     ),
                                   ),
-                                  Listener(
-                                    onPointerDown: _onShutterPointerDown,
-                                    onPointerUp: (_) =>
-                                        _onShutterPointerUpOrCancel(),
-                                    onPointerCancel: (_) =>
-                                        _onShutterPointerUpOrCancel(),
-                                    child: Container(
-                                      width: _kShutterInner,
-                                      height: _kShutterInner,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: _recording
-                                            ? Colors.redAccent
-                                                .withValues(alpha: 0.22)
-                                            : Colors.white.withValues(alpha: 0.08),
+                                  Semantics(
+                                    button: true,
+                                    label: _recording
+                                        ? 'Stop recording'
+                                        : (widget.videoOnly
+                                            ? 'Hold to record video'
+                                            : 'Hold for video, tap for photo'),
+                                    hint: _recording
+                                        ? 'Tap to finish'
+                                        : 'Slide left to lock recording',
+                                    child: Listener(
+                                      onPointerDown: _onShutterPointerDown,
+                                      onPointerMove: _onShutterPointerMove,
+                                      onPointerUp: (_) =>
+                                          _onShutterPointerUpOrCancel(),
+                                      onPointerCancel: (_) =>
+                                          _onShutterPointerUpOrCancel(
+                                              cancelled: true),
+                                      child: AnimatedContainer(
+                                        duration:
+                                            const Duration(milliseconds: 220),
+                                        curve: Curves.easeOutCubic,
+                                        width: _kShutterInner,
+                                        height: _kShutterInner,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: _recording
+                                              ? Colors.redAccent
+                                                  .withValues(alpha: 0.22)
+                                              : Colors.white
+                                                  .withValues(alpha: 0.08),
+                                        ),
+                                        alignment: Alignment.center,
+                                        child: _recording
+                                            ? _buildRecordingStopIcon()
+                                            : null,
                                       ),
-                                      alignment: Alignment.center,
-                                      child: _recording
-                                          ? const PhosphorIcon(
-                                              PhosphorIconsRegular.stop,
-                                              color: Colors.redAccent,
-                                              size: _kShutterStopIconSize,
-                                            )
-                                          : null,
                                     ),
                                   ),
+                                  if (_holdVideoArmed &&
+                                      _recording &&
+                                      !_recordingLocked)
+                                    Positioned(
+                                      left: -28,
+                                      top: (_kShutterOuter - 8) / 2,
+                                      width: 32,
+                                      height: 8,
+                                      child: IgnorePointer(
+                                        child: _buildLockTrail(),
+                                      ),
+                                    ),
+                                  if (_holdVideoArmed &&
+                                      _recording &&
+                                      !_recordingLocked)
+                                    Positioned(
+                                      left: -96,
+                                      top: 0,
+                                      bottom: 0,
+                                      child: IgnorePointer(
+                                        child: Center(
+                                          child: _buildLockHint(),
+                                        ),
+                                      ),
+                                    ),
                                 ],
                               ),
                             ),
@@ -3220,8 +4510,11 @@ class _MinisIndependentCaptureScreenState
                                   ),
                                 ),
                             _roundSecondaryButton(
-                              icon: PhosphorIconsRegular.check,
+                              icon: Icons.check,
                               filled: _canConfirmClip,
+                              semanticLabel: _canConfirmClip
+                                  ? 'Continue with this clip'
+                                  : 'Continue (disabled, no clip yet)',
                               onPressed: _canConfirmClip
                                   ? () => unawaited(_confirmClip())
                                   : null,

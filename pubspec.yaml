@@ -12,13 +12,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  audio_waveforms: ^1.3.0
-  audio_session: ^0.2.2
-  # Transitive of pro_image_editor; 4.4+ breaks pro_image_editor 7.x (EmojiViewState arity).
-  emoji_picker_flutter: ">=4.3.0 <4.4.0"
-  camera: ^0.11.0+2
-  device_info_plus: ^11.2.0
-  file_picker: ^10.3.8
   get: ^4.7.2
   image_picker: ^1.1.2
   path: ^1.9.1
@@ -51,3 +44,22 @@ flutter:
         pluginClass: LoopitMinisPlugin
       ios:
         pluginClass: LoopitMinisPlugin
+  assets:
+    - lib/assets/deepar_filters/burning_effect/
+    - lib/assets/deepar_filters/devil_neon_horns/
+    - lib/assets/deepar_filters/elephant_trunk/
+    - lib/assets/deepar_filters/emotion_meter/
+    - lib/assets/deepar_filters/emotions_exaggerator/
+    - lib/assets/deepar_filters/fire_effect/
+    - lib/assets/deepar_filters/flower_face/
+    - lib/assets/deepar_filters/galaxy_background/
+    - lib/assets/deepar_filters/hope/
+    - lib/assets/deepar_filters/humanoid/
+    - lib/assets/deepar_filters/makeup_look_simple/
+    - lib/assets/deepar_filters/makeup_look_split_screen/
+    - lib/assets/deepar_filters/ping_pong_minigame/
+    - lib/assets/deepar_filters/pixel_heart_particles/
+    - lib/assets/deepar_filters/snail/
+    - lib/assets/deepar_filters/stallone/
+    - lib/assets/deepar_filters/vendetta_mask/
+    - lib/assets/deepar_filters/viking_helmet_pbr/

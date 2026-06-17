@@ -8,7 +8,10 @@ import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 
 /**
- * Embeds CameraX [PreviewView] inside Flutter for native Minis camera preview.
+ * Legacy PlatformView factory kept under viewType `minis_native_camera` for
+ * backward compatibility with the existing Dart engine. The new code path
+ * (`loopit/minis/camera/preview` etc.) lives in
+ * [com.loopit.minis.camera.CameraPlatformViewFactory].
  */
 class MinisNativeCameraPlatformViewFactory : PlatformViewFactory(StandardMessageCodec.INSTANCE) {
     override fun create(context: Context, viewId: Int, args: Any?): PlatformView {
@@ -17,17 +20,18 @@ class MinisNativeCameraPlatformViewFactory : PlatformViewFactory(StandardMessage
 }
 
 private class MinisNativeCameraPlatformView(context: Context) : PlatformView {
-    private val previewView = PreviewView(context)
-
-    init {
-        previewView.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-        previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
-        MinisCameraXBridge.attachPreviewView(previewView)
+    // COMPATIBLE = TextureView under the hood. PERFORMANCE (SurfaceView)
+    // punches through Flutter's overlay, so capture-screen icons drawn on top
+    // become invisible (the user can still tap them blindly). TextureView is
+    // composited inside Flutter's surface, keeping overlay icons visible.
+    private val previewView = PreviewView(context).apply {
+        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        scaleType = PreviewView.ScaleType.FILL_CENTER
     }
+
+    init { MinisCameraXBridge.attachPreviewView(previewView) }
 
     override fun getView(): View = previewView
 
-    override fun dispose() {
-        MinisCameraXBridge.detachPreviewView(previewView)
-    }
+    override fun dispose() { MinisCameraXBridge.detachPreviewView(previewView) }
 }

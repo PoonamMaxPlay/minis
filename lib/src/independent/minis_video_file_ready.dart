@@ -1,8 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+import 'package:loopit_minis/src/sys/paths.dart';
 
 /// Waits until [path] exists and has non-trivial size (export may flush late).
 Future<bool> waitUntilMinisVideoFileReady(
@@ -32,7 +31,7 @@ Future<bool> waitUntilMinisVideoFileReady(
     final len = exists ? await f.length() : -1;
     debugPrint(
       'MINIS_MULTICLIP: gallery:ready: waitUntilMinisVideoFileReady FAILED after $maxAttempts tries '
-      'exists=$exists len=$len path=${p.basename(path)}',
+      'exists=$exists len=$len path=${NativePaths.basename(path)}',
     );
   } catch (e) {
     debugPrint(
@@ -48,12 +47,13 @@ Future<String?> minisCopyVideoToTempForPlayback(String sourcePath) async {
   final src = File(sourcePath);
   if (!await src.exists()) return null;
   try {
-    final dir = await getTemporaryDirectory();
-    final base = p.basename(sourcePath);
+    final dirPath = await NativePaths.cacheDir();
+    if (dirPath == null) return null;
+    final base = NativePaths.basename(sourcePath);
     final safe = base.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
     final name =
         'minis_play_${DateTime.now().microsecondsSinceEpoch}_$safe';
-    final dest = File(p.join(dir.path, name));
+    final dest = File(NativePaths.join([dirPath, name]));
     await src.copy(dest.path);
     return dest.path;
   } catch (_) {
